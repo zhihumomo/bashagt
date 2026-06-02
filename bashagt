@@ -85,7 +85,7 @@ malicious purposes.
 Restriction tiers — in descending priority:
   HARD REDLINE (MUST NEVER violate): Refuse destructive techniques, DoS, supply chain compromise.
   STRONG DEFAULT (override only with explicit user instruction): Do not modify files unless the user clearly requests it. Default to read-only for analysis, explanation, discussion, exploration, and suggestions.
-  JUDGMENT CALL (use request() when uncertain, see §5): When you identify an issue worth fixing but the user has not asked — point it out, explain what should change, then ASK the user whether to proceed. Never silently modify.
+  USER ENFORCEMENT (safe mode, §2.1): The user may enable a confirmation layer that intercepts write_file/edit_file/delete_file/bash before execution. When a tool returns {"status":"denied","reason":"Safe mode: ..."}, this is a definitive user rejection — do NOT retry the same tool.
 
 Default to read-only when the user is asking for:
 - Analysis / diagnosis: "is there a bug?", "what caused the crash?"
@@ -116,6 +116,17 @@ Before executing any bash command or modifying files:
 - Assess the impact and blast radius of the operation.
 - For high-risk operations, use the request() tool as described in §5.
 - Protecting the project and system security is your highest priority.
+
+§2.1 — SAFE MODE DENIAL: When safe mode is active, destructive tools
+(write_file, edit_file, delete_file, bash) are intercepted for user confirmation
+before execution. If a tool_result returns {"status":"denied","reason":"Safe mode:
+<tool> was denied by user."}, this means the human explicitly chose "No, cancel"
+in the confirmation dialog. This is a definitive user rejection — it is NOT a
+transient error or system glitch. Critical rules:
+  1. Do NOT retry the same tool. The denial will not change.
+  2. Explain the operation was blocked by safe mode.
+  3. Suggest the user either approve it when the dialog appears, or disable
+     safe mode by pressing Shift+Tab.
 
 '
 _DEFAULT_SP_REST='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -485,7 +496,7 @@ DEFAULT_CACHE_PROBE_MAX_MISSES="3"
 DEFAULT_CACHE_PROBE_REPROBE="900"
 DEFAULT_CACHE_API_SUPPORT="auto"   # auto | force | off
 DEFAULT_CACHE_MARKER='{"cache_control":{"type":"ephemeral"}}'
-DEFAULT_DIFF_DARK_MODE="true"
+DEFAULT_DARK_MODE="true"
 # Proxy defaults
 DEFAULT_PROXY_NOPROXY="localhost,127.0.0.1,::1"
 
@@ -723,6 +734,7 @@ YELLOW=$'\033[33m' ; RED=$'\033[31m' ; GRAY=$'\033[90m' ; RESET=$'\033[0m' ; INV
 LIGHT_GREEN=$'\033[92m'
 LIGHT_YELLOW=$'\033[93m'
 LIGHT_PINK=$'\033[38;5;218m'
+LIGHT_CYAN=$'\033[1;36m'
 
 # Spinner frames for thinking indicator
 SPINNER=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
@@ -1279,13 +1291,13 @@ _stream_render() {
                     if [[ -n "$_tc" ]]; then
                         while IFS= read -r _tcl; do
                             if [[ "$_tcl" =~ ^[[:space:]]*[0-9]+\ \+ ]]; then
-                                if [[ "${BASHAGT_DIFF_DARK_MODE:-true}" == "true" ]]; then
+                                if [[ "${BASHAGT_DARK_MODE:-true}" == "true" ]]; then
                                     printf '      \033[48;2;20;50;30m\033[38;2;87;210;120m%s\033[K\033[0m\n' "$_tcl"
                                 else
                                     printf '      \033[48;2;230;255;235m\033[38;2;40;167;69m%s\033[K\033[0m\n' "$_tcl"
                                 fi
                             elif [[ "$_tcl" =~ ^[[:space:]]*[0-9]+\ - ]]; then
-                                if [[ "${BASHAGT_DIFF_DARK_MODE:-true}" == "true" ]]; then
+                                if [[ "${BASHAGT_DARK_MODE:-true}" == "true" ]]; then
                                     printf '      \033[48;2;50;18;22m\033[38;2;245;100;110m%s\033[K\033[0m\n' "$_tcl"
                                 else
                                     printf '      \033[48;2;255;235;238m\033[38;2;215;58;73m%s\033[K\033[0m\n' "$_tcl"
@@ -2783,7 +2795,7 @@ init_system_dirs() {
   "cache_probe_reprobe": 900,
   "cache_api_support": "auto",
   "cache_marker": {"cache_control":{"type":"ephemeral"}},
-  "diff_dark_mode": "true",
+  "dark_mode": "true",
 
   "_________________": "── Trace ──",
   "trace_enabled": "1",
@@ -3751,6 +3763,7 @@ _input_read_key() {
                 '[201~')  _INPUT_KEY_RET='PASTE_END' ;;
                 '[1;5C')  _INPUT_KEY_RET='C-RIGHT' ;;
                 '[1;5D')  _INPUT_KEY_RET='C-LEFT' ;;
+                '[Z')     _INPUT_KEY_RET='S-TAB' ;;
                 'OA')     _INPUT_KEY_RET='UP' ;;    # SS3 cursor keys
                 'OB')     _INPUT_KEY_RET='DOWN' ;;
                 'OC')     _INPUT_KEY_RET='RIGHT' ;;
@@ -4245,15 +4258,26 @@ _in_submit_flash() {
     # Empty input: no flash, just advance
     [[ -z "$_IN_LINE" ]] && { printf '\n'; return; }
 
-    local _blue_bg _blue_fg
-    if [[ "${BASHAGT_DIFF_DARK_MODE:-true}" == "true" ]]; then
-        _blue_bg=$'\033[48;2;20;25;55m'
-        _blue_fg=$'\033[38;2;100;170;255m'
+    local _sub_bg _sub_fg
+    # Normal mode: blue
+    if [[ "${BASHAGT_DARK_MODE:-true}" == "true" ]]; then
+        _sub_bg=$'\033[48;2;20;25;55m'
+        _sub_fg=$'\033[38;2;100;170;255m'
     else
-        _blue_bg=$'\033[48;2;235;240;255m'
-        _blue_fg=$'\033[38;2;40;70;180m'
+        _sub_bg=$'\033[48;2;235;240;255m'
+        _sub_fg=$'\033[38;2;40;70;180m'
     fi
-    local _blue="$_blue_bg$_blue_fg"
+    # Safe mode override: warm amber
+    if [[ "${BASHAGT_SAFE_MODE:-0}" == "1" ]]; then
+        if [[ "${BASHAGT_DARK_MODE:-true}" == "true" ]]; then
+            _sub_bg=$'\033[48;2;60;40;15m'
+            _sub_fg=$'\033[38;2;255;200;80m'
+        else
+            _sub_bg=$'\033[48;2;255;245;225m'
+            _sub_fg=$'\033[38;2;180;130;30m'
+        fi
+    fi
+    local _sub="$_sub_bg$_sub_fg"
 
     # 1. Jump to first visual row of input area
     if [[ ${_IN_CURSOR_ROW:-0} -gt 0 ]]; then
@@ -4273,7 +4297,7 @@ _in_submit_flash() {
         (( _i == 0 )) && _pl="$_IN_PROMPT"
         _trim="${_pl%" "}"
         printf '%s%s%s %s%s%s\n' \
-            "$_blue" "$_trim" "$_blue" "${_lines[$_i]}" \
+            "$_sub" "$_trim" "$_sub" "${_lines[$_i]}" \
             "$_EL" "$RESET"
     done
 
@@ -4540,6 +4564,7 @@ _in_dispatch() {
                 _in_buf_reposition
             fi
             ;;
+        safe-toggle)        _safe_toggle ;;
     esac
     return 0
 }
@@ -4548,6 +4573,37 @@ _in_dispatch() {
 # _input_cleanup() handles the normal-exit path; this is the safety net.
 _input_exit_cleanup() {
     printf '\033[?2004l'
+}
+
+# ── Safe mode support ──
+_safe_update_prompt() {
+    local _mode="${1:-${BASHAGT_SAFE_MODE:-0}}"
+    if [[ "$_mode" == "1" ]]; then
+        _IN_PROMPT=$'  \033[1;93m›\033[0m '
+    else
+        _IN_PROMPT=$'  \033[1;36m›\033[0m '
+    fi
+}
+
+_safe_toggle() {
+    if [[ "${BASHAGT_SAFE_MODE:-0}" == "1" ]]; then
+        BASHAGT_SAFE_MODE=0
+    else
+        BASHAGT_SAFE_MODE=1
+    fi
+    _safe_update_prompt "$BASHAGT_SAFE_MODE"
+    _in_buf_redraw
+    log "SAFE_TOGGLE mode=$BASHAGT_SAFE_MODE" 2>/dev/null
+}
+
+_safe_toggle_signal() {
+    if [[ "${BASHAGT_SAFE_MODE:-0}" == "1" ]]; then
+        BASHAGT_SAFE_MODE=0
+    else
+        BASHAGT_SAFE_MODE=1
+    fi
+    _safe_update_prompt "$BASHAGT_SAFE_MODE"
+    log "SAFE_TOGGLE_SIGNAL mode=$BASHAGT_SAFE_MODE" 2>/dev/null
 }
 
 # ── _input_init — initialize input layer ──
@@ -4588,6 +4644,7 @@ _input_init() {
         [BACKSPACE]="delete-backward"
         [ENTER]="submit-or-newline"
         [TAB]="complete"
+        [S-TAB]="safe-toggle"
         [C-a]="cursor-buffer-start"
         [C-e]="cursor-buffer-end"
         [C-k]="kill-to-end"
@@ -4941,7 +4998,7 @@ load_config() {
         "declare -g _CFG_project_dir=\($c.project_dir // "" | sh)",
         "declare -g _CFG_daemon_port=\($c.daemon_port // "" | sh)",
         "declare -g _CFG_subproc_max=\($c.subproc_max // "" | sh)",
-        "declare -g _CFG_diff_dark_mode=\($c.diff_dark_mode // "" | sh)",
+        "declare -g _CFG_dark_mode=\($c.dark_mode // "" | sh)",
         "declare -g _CFG_trace_enabled=\($c.trace_enabled // "" | sh)",
         "declare -g _CFG_trace_max_frames=\($c.trace_max_frames // "" | sh)",
         "declare -g _CFG_trace_snapshot_interval=\($c.trace_snapshot_interval // "" | sh)",
@@ -5017,7 +5074,7 @@ load_config() {
     BASHAGT_CACHE_PROBE_REPROBE=$(_get_setting "cache_probe_reprobe" "BASHAGT_CACHE_PROBE_REPROBE" "$DEFAULT_CACHE_PROBE_REPROBE")
     BASHAGT_CACHE_API_SUPPORT=$(_get_setting "cache_api_support" "BASHAGT_CACHE_API_SUPPORT" "$DEFAULT_CACHE_API_SUPPORT")
     BASHAGT_CACHE_MARKER=$(_get_setting "cache_marker" "BASHAGT_CACHE_MARKER" "$DEFAULT_CACHE_MARKER")
-    BASHAGT_DIFF_DARK_MODE=$(_get_setting "diff_dark_mode" "BASHAGT_DIFF_DARK_MODE" "$DEFAULT_DIFF_DARK_MODE")
+    BASHAGT_DARK_MODE=$(_get_setting "dark_mode" "BASHAGT_DARK_MODE" "$DEFAULT_DARK_MODE")
     BASHAGT_PROXY_URL=$(_get_setting "proxy_url" "BASHAGT_PROXY_URL" "")
     BASHAGT_PROXY_USER=$(_get_setting "proxy_user" "BASHAGT_PROXY_USER" "")
     BASHAGT_PROXY_PASS=$(_get_setting "proxy_pass" "BASHAGT_PROXY_PASS" "")
@@ -11931,6 +11988,44 @@ _log_tool_done() {
     log "DEBUG: TOOL_DONE  $name      rc=$rc output_size=$out_size"
 }
 
+# ── Safe mode confirmation (before dispatch_tool — uses _request_ui via $()) ──
+_safe_confirm() {
+    local _tool="$1" _input="$2"
+    local _prompt _context=""
+
+    # Daemon/stream mode: skip (no TTY for _request_ui)
+    _request_detect_mode || return 0
+
+    case "$_tool" in
+        bash)
+            local _cmd; _cmd=$(jq -r '.command // ""' <<< "$_input")
+            local _to; _to=$(jq -r '.timeout // "120"' <<< "$_input")
+            _prompt="Execute bash command? (timeout: ${_to}s)"
+            _context="${_cmd//$'\n'/; }"
+            (( ${#_context} > 200 )) && _context="${_context:0:197}..."
+            ;;
+        write_file)
+            local _path; _path=$(jq -r '.path // ""' <<< "$_input")
+            local _content; _content=$(jq -r '.content // ""' <<< "$_input")
+            _prompt="Write ${#_content} bytes to $_path?"
+            ;;
+        edit_file)
+            local _path; _path=$(jq -r '.path // ""' <<< "$_input")
+            _prompt="Apply edit to $_path?"
+            ;;
+        delete_file)
+            local _path; _path=$(jq -r '.path // ""' <<< "$_input")
+            _prompt="Delete $_path?"
+            ;;
+    esac
+
+    local _req_result _choice
+    _req_result=$(tool_request "$_prompt" '["Yes, execute","No, cancel"]' "$_context" 2>/dev/null)
+    _choice=$(jq -r '.choice // ""' <<< "$_req_result" 2>/dev/null)
+    [[ "$_choice" == "Yes, execute" ]] && return 0
+    return 1
+}
+
 dispatch_tool() {
     local name="$1" input_json="$2"
 
@@ -12057,6 +12152,7 @@ dispatch_tool() {
 # Global flag: set by _request_async() to force end_turn in daemon mode
 _REQUEST_PENDING=0
 _RESPONSE_FILE=""  # set by _request_async in oneshot stream mode for run_turn polling
+BASHAGT_SAFE_MODE=0          # /safe toggle: 1 = require confirmation for destructive tools
 
 # ── Mode detection: use blocking TUI when /dev/tty is available ──
 _request_detect_mode() {
@@ -12085,6 +12181,7 @@ _req_disp_width() {
 # Usage: _req_content_line <text> <max_display_width> [dim]
 _req_content_line() {
     local _text="$1" _pw="$2" _dim="${3:-0}" _disp _pad
+    _text="${_text//$'\n'/ }"
     _disp=$(_req_disp_width "$_text")
     _pad=$((_pw - _disp))
     (( _pad < 0 )) && _pad=0
@@ -12099,6 +12196,7 @@ _request_ui_render() {
     local _prompt="$1" _context="$2" _opt_labels_name="$3" _opt_count="$4"
     local _selected="$5" _i _idx _label _width _pad _disp
     local -n _opts="$_opt_labels_name"
+    _REQ_LINE_COUNT=0
 
     # Dynamic width: use terminal width (capped at 80), fallback to 62
     _width=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
@@ -12116,17 +12214,17 @@ _request_ui_render() {
     # Clear from cursor to end of screen (preserves history above)
 
     # Top border
-    printf '╭─%s─╮\r\n' "$_border" > /dev/tty
+    printf '╭─%s─╮\r\n' "$_border" > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
 
     # Title: "│ " + left-justified-content(_width-4) + " │" = _width cols
-    printf '│ %-*s │\r\n' "$((_width - 4))" 'Human Oversight' > /dev/tty
+    printf '│ %-*s │\r\n' "$((_width - 4))" 'Human Oversight' > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
     # Empty separator: "│" + spaces(_width-2) + "│" = _width cols
-    printf '│%*s│\r\n' "$((_width - 2))" '' > /dev/tty
+    printf '│%*s│\r\n' "$((_width - 2))" '' > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
 
     # Prompt: CJK-safe rendering
     _disp=$(_req_disp_width "$_prompt")
     if (( _disp <= _cw )); then
-        _req_content_line "$_prompt" "$_cw" 0
+        _req_content_line "$_prompt" "$_cw" 0; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
     else
         # Truncate with ellipsis (character-safe)
         local _trimmed="" _t_disp=0 _ch _cd
@@ -12138,15 +12236,15 @@ _request_ui_render() {
             _trimmed+="$_ch"
             _t_disp=$((_t_disp + _cd))
         done
-        _req_content_line "$_trimmed" "$_cw" 0
+        _req_content_line "$_trimmed" "$_cw" 0; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
     fi
 
     # Context (dim text)
     if [[ -n "$_context" ]]; then
-        printf '│%*s│\r\n' "$((_width - 2))" '' > /dev/tty
+        printf '│%*s│\r\n' "$((_width - 2))" '' > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
         _disp=$(_req_disp_width "$_context")
         if (( _disp <= _cw )); then
-            _req_content_line "$_context" "$_cw" 1
+            _req_content_line "$_context" "$_cw" 1; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
         else
             local _trimmed="" _t_disp=0 _ch _cd
             for ((_i=0; _i<${#_context}; _i++)); do
@@ -12157,11 +12255,11 @@ _request_ui_render() {
                 _trimmed+="$_ch"
                 _t_disp=$((_t_disp + _cd))
             done
-            _req_content_line "$_trimmed" "$_cw" 1
+            _req_content_line "$_trimmed" "$_cw" 1; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
         fi
     fi
 
-    printf '│%*s│\r\n' "$((_width - 2))" '' > /dev/tty
+    printf '│%*s│\r\n' "$((_width - 2))" '' > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
 
     # Options
     for ((_i=0; _i<_opt_count; _i++)); do
@@ -12174,21 +12272,21 @@ _request_ui_render() {
             _pad=$((_width - 3 - 2 - 2 - ${#_idx} - _disp - 2))
             (( _pad < 0 )) && _pad=0
             printf '│  %s❯ %s. %s%s%*s │\r\n' \
-                "$CYAN" "$_idx" "$_label" "$RESET" "$_pad" '' > /dev/tty
+                "$CYAN" "$_idx" "$_label" "$RESET" "$_pad" '' > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
         else
             # "│    N. label<pad> │"  — prefix: 5+2+${#_idx}=7+${#_idx} cols
             _pad=$((_width - 5 - 2 - ${#_idx} - _disp - 2))
             (( _pad < 0 )) && _pad=0
             printf '│    %s. %s%*s │\r\n' \
-                "$_idx" "$_label" "$_pad" '' > /dev/tty
+                "$_idx" "$_label" "$_pad" '' > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
         fi
     done
 
-    printf '│%*s│\r\n' "$((_width - 2))" '' > /dev/tty
-    printf '╰─%s─╯\r\n' "$_border" > /dev/tty
+    printf '│%*s│\r\n' "$((_width - 2))" '' > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
+    printf '╰─%s─╯\r\n' "$_border" > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
 
     # Footer
-    printf '  %s↑↓ navigate  Enter select  Esc/q cancel%s\r\n' "$DIM" "$RESET" > /dev/tty
+    printf '  %s↑↓ navigate  Enter select  Esc/q cancel%s\r\n' "$DIM" "$RESET" > /dev/tty; _REQ_LINE_COUNT=$((_REQ_LINE_COUNT + 1))
 }
 
 # ── Blocking TUI: arrow-key menu on /dev/tty ──
@@ -12213,9 +12311,9 @@ _request_ui() {
     done
 
     # _request_ui_render truncates wide prompts to 1 line (ellipsis), so \n in
-    # source text never reaches display. Count: chrome(7)+footer(1)+prompt(1)=9.
-    local _menu_lines=$(( _opt_count + 9 ))
-    [[ -n "$_context" ]] && _menu_lines=$((_menu_lines + 2))
+    # source text never reaches display. _menu_lines set dynamically after
+    # initial render based on actual rendered line count.
+    local _menu_lines=0
 
     # Redirect stdin from terminal — _request_ui may be called in a
     # command substitution where stdin is a pipe; _input_read_key needs TTY.
@@ -12231,6 +12329,7 @@ _request_ui() {
 
     # Initial render
     _request_ui_render "$_prompt" "$_context" _opt_labels "$_opt_count" "$_selected"
+    _menu_lines=$_REQ_LINE_COUNT
 
     # Event loop — reuses shared _input_read_key() for normalized key names
     while :; do
@@ -12761,6 +12860,31 @@ _slash_mcp() {
         esac
     fi
 }
+_slash_safe() {
+    local _trimmed="$1" _args="${_trimmed#/safe }"
+    [[ "$_args" == "$_trimmed" ]] && _args=""
+
+    case "$_args" in
+        on)   BASHAGT_SAFE_MODE=1 ;;
+        off)  BASHAGT_SAFE_MODE=0 ;;
+        "")
+            if [[ "${BASHAGT_SAFE_MODE:-0}" == "1" ]]; then
+                BASHAGT_SAFE_MODE=0
+            else
+                BASHAGT_SAFE_MODE=1
+            fi
+            ;;
+        *)  _stream_emit "warning" "$(jq -nc '{content: "  Usage: /safe [on|off]"}')"; return ;;
+    esac
+
+    _safe_update_prompt "$BASHAGT_SAFE_MODE"
+
+    if [[ "${BASHAGT_SAFE_MODE:-0}" == "1" ]]; then
+        _stream_emit "text" "$(jq -nc '{content: "  \033[93m◆ Safe mode ON\033[0m — destructive tools require confirmation. Shift+Tab to toggle."}')"
+    else
+        _stream_emit "text" "$(jq -nc '{content: "  \033[36m◆ Safe mode OFF\033[0m — tools execute directly. Shift+Tab to toggle."}')"
+    fi
+}
 _slash_help() {
     local _help_out
     printf -v _help_out '%s\n' \
@@ -12831,6 +12955,7 @@ _register_slash undo       _slash_undo
 _register_slash help       _slash_help
 _register_slash exit       _slash_exit
 _register_slash quit       _slash_exit
+_register_slash safe       _slash_safe
 
 # ── Behavioral rules reminder (every turn, ephemeral — not persisted to history) ──
 _RULES_REMINDER_TEXT='1.  Confirm explicit edit request before modifying. Use request() if uncertain.
@@ -12974,6 +13099,13 @@ Before creating TODO items, verify the plan:
                 msg_add_assistant '[{"type":"text","text":"[interrupted]"}]'
                 log "DEBUG: TURN_END  stop=interrupted rounds=$_round tok_in=$TURN_INPUT_TOKENS tok_out=$TURN_OUTPUT_TOKENS"
                 save_history
+                accumulate_turn_tokens
+                local _ts_msg; _ts_msg=$(printf '%s %s │ %s %s' \
+                    "$(ui_label '──' gray)" \
+                    "$(ui_time $(( $(_timestamp_ms) - turn_start )))" \
+                    "$(ui_tokens $TURN_INPUT_ACCUM $TURN_OUTPUT_ACCUM)" \
+                    "$(ui_label '──' gray)")
+                _stream_emit "info" "$(jq -nc --arg c "$_ts_msg" '{content: $c}')"
                 _stream_emit "warning" "$(jq -nc '{content: "Turn interrupted (Esc/Ctrl-C)"}')"
                 return 0
             fi
@@ -13162,25 +13294,46 @@ Before creating TODO items, verify the plan:
                         *)  (( ${#_tsub_label} > 80 )) && _tsub_label="${_tsub_label:0:77}..." ;;
                     esac
 
-                    # Use temp file to avoid subshell — dispatch_tool modifies globals
-                    # (TODOS) that must survive in the parent shell.
-                    # Skip tool_start/tool_end for agent/web_search/agent_batch — they have
-                    # their own async_spin spinner (now correctly routed via fd 8).
-                    case "$tool_name" in
-                        agent|web_search|agent_batch|make_todos|undo) ;;
-                        *) _stream_emit "tool_start" "$(jq -nc \
-                               --arg n "$tool_name" --arg id "$tool_id" --arg d "${_tsub_label:-}" \
-                               '{name: $n, id: $id, desc: $d}')" ;;
-                    esac
-                    _tool_out_file=$(_mktemp_file /tmp/bashagt_tool.XXXXXX 2>/dev/null)
-                    if [[ -n "$_tool_out_file" && -f "$_tool_out_file" ]]; then
-                        dispatch_tool "$tool_name" "$tool_input" > "$_tool_out_file" || exit_code=$?
-                        tool_output=$(< "$_tool_out_file")
-                        # Strip any leaked JSONL status frames (defense in depth)
-                        tool_output=$(grep -v '^{"type":"\(status_\|tool_output\|tool_tick\)' <<< "$tool_output")
-                        rm -f "$_tool_out_file"
-                    else
-                        tool_output=$(dispatch_tool "$tool_name" "$tool_input") || exit_code=$?
+                    # ── Safe mode guard (before tool_start — clean cursor model) ──
+                    local _safe_skip=0
+                    if [[ "${BASHAGT_SAFE_MODE:-0}" == "1" ]]; then
+                        case "$tool_name" in
+                            write_file|edit_file|delete_file|bash)
+                                if ! _safe_confirm "$tool_name" "$tool_input"; then
+                                    tool_output=$(jq -nc \
+                                        --arg tool "$tool_name" \
+                                        '{status: "denied", reason: ("Safe mode: "+$tool+" was denied by user — see §2.1. Do NOT retry.")}')
+                                    local _denied_result
+                                    _denied_result=$(format_tool_result "$tool_id" "$tool_output" "false")
+                                    results_json=$(echo "$results_json" | jq --argjson r "$_denied_result" '. + [$r]')
+                                    _SAFE_DENIED=1
+                                    break
+                                fi
+                                ;;
+                        esac
+                    fi
+
+                    if (( ! _safe_skip )); then
+                        # Use temp file to avoid subshell — dispatch_tool modifies globals
+                        # (TODOS) that must survive in the parent shell.
+                        # Skip tool_start/tool_end for agent/web_search/agent_batch — they have
+                        # their own async_spin spinner (now correctly routed via fd 8).
+                        case "$tool_name" in
+                            agent|web_search|agent_batch|make_todos|undo|request) ;;
+                            *) _stream_emit "tool_start" "$(jq -nc \
+                                   --arg n "$tool_name" --arg id "$tool_id" --arg d "${_tsub_label:-}" \
+                                   '{name: $n, id: $id, desc: $d}')" ;;
+                        esac
+                        _tool_out_file=$(_mktemp_file /tmp/bashagt_tool.XXXXXX 2>/dev/null)
+                        if [[ -n "$_tool_out_file" && -f "$_tool_out_file" ]]; then
+                            dispatch_tool "$tool_name" "$tool_input" > "$_tool_out_file" || exit_code=$?
+                            tool_output=$(< "$_tool_out_file")
+                            # Strip any leaked JSONL status frames (defense in depth)
+                            tool_output=$(grep -v '^{"type":"\(status_\|tool_output\|tool_tick\)' <<< "$tool_output")
+                            rm -f "$_tool_out_file"
+                        else
+                            tool_output=$(dispatch_tool "$tool_name" "$tool_input") || exit_code=$?
+                        fi
                     fi
                     _ts_elapsed=$(( $(_timestamp_ms) - _ts_start ))
                     (( _ts_elapsed < 0 )) && _ts_elapsed=0
@@ -13210,12 +13363,14 @@ Before creating TODO items, verify the plan:
                             [[ -n "$_repl" ]] && tool_output="$_repl"
                         done < <(jq -c '.[]' <<< "$_pt_hook_results" 2>/dev/null)
                     fi
-                    case "$tool_name" in
-                        agent|web_search|agent_batch|make_todos|undo) ;;
-                        *) _stream_emit "tool_end" "$(jq -nc \
-                               --arg n "$tool_name" --arg e "$(ui_time $_ts_elapsed)" --argjson err "$_terr" \
-                               '{name: $n, elapsed_str: $e, error: $err}')" ;;
-                    esac
+                    if (( ! _safe_skip )); then
+                        case "$tool_name" in
+                            agent|web_search|agent_batch|make_todos|undo|request) ;;
+                            *) _stream_emit "tool_end" "$(jq -nc \
+                                   --arg n "$tool_name" --arg e "$(ui_time $_ts_elapsed)" --argjson err "$_terr" \
+                                   '{name: $n, elapsed_str: $e, error: $err}')" ;;
+                        esac
+                    fi
 
                     # Emit deferred feedback from tool execution (e.g. _plan_auto_todo)
                     if [[ -n "${_DEFERRED_FEEDBACK:-}" ]]; then
@@ -13230,43 +13385,47 @@ Before creating TODO items, verify the plan:
                     fi
 
                     # Update non-productive streak for post_response hook
-                    case "$tool_name" in
-                        edit_file|write_file|bash|task_create|task_update|make_todos|\
-                        agent|agent_batch|skill|request|mcp__*)
-                            NON_PRODUCTIVE_STREAK=0 ;;
-                        *)
-                            NON_PRODUCTIVE_STREAK=$((NON_PRODUCTIVE_STREAK + 1)) ;;
-                    esac
+                    if (( ! _safe_skip )); then
+                        case "$tool_name" in
+                            edit_file|write_file|bash|task_create|task_update|make_todos|\
+                            agent|agent_batch|skill|request|mcp__*)
+                                NON_PRODUCTIVE_STREAK=0 ;;
+                            *)
+                                NON_PRODUCTIVE_STREAK=$((NON_PRODUCTIVE_STREAK + 1)) ;;
+                        esac
+                    fi
 
                     # Accumulate tools for post-hoc tree display
-                    case "$tool_name" in
-                        web_search|agent|agent_batch|make_todos|undo) ;;
-                        *)
-                            local _tdesc=""
-                            _tdesc=$(jq -r '.description // ""' <<< "$tool_input" 2>/dev/null)
-                            [[ "$_tdesc" == "null" ]] && _tdesc=""
-                            _tdesc="${_tdesc//$'\n'/ }"
-                            case "$tool_name" in
-                                list_files|read_file|delete_file)
-                                    local _tpath=""
-                                    _tpath=$(jq -r '.path // ""' <<< "$tool_input" 2>/dev/null)
-                                    [[ "$_tpath" == "null" ]] && _tpath=""
-                                    [[ -n "$_tpath" ]] && _tdesc="${_tdesc} ${LIGHT_YELLOW}·${RESET} ${_tpath}"
-                                    (( ${#_tdesc} > 144 )) && _tdesc="${_tdesc:0:141}..."
-                                    ;;
-                                *)  (( ${#_tdesc} > 80 )) && _tdesc="${_tdesc:0:77}..." ;;
-                            esac
-                            _TOOL_TREE_ENTRIES+="${tool_name}"$'\t'"$(ui_time $_ts_elapsed)"$'\t'"${_tdesc//$'\n'/ }"$'\n'
-                            _TOOL_TREE_COUNT=$((_TOOL_TREE_COUNT + 1))
-                            if [[ "$tool_name" == "edit_file" || "$tool_name" == "write_file" ]]; then
-                                local _diff_disp="${tool_output}" _diff_max=15000
-                                if (( ${#_diff_disp} > _diff_max )); then
-                                    _diff_disp="${_diff_disp:0:$_diff_max}"$'\n  ...[truncated]'
+                    if (( ! _safe_skip )); then
+                        case "$tool_name" in
+                            web_search|agent|agent_batch|make_todos|undo|request) ;;
+                            *)
+                                local _tdesc=""
+                                _tdesc=$(jq -r '.description // ""' <<< "$tool_input" 2>/dev/null)
+                                [[ "$_tdesc" == "null" ]] && _tdesc=""
+                                _tdesc="${_tdesc//$'\n'/ }"
+                                case "$tool_name" in
+                                    list_files|read_file|delete_file)
+                                        local _tpath=""
+                                        _tpath=$(jq -r '.path // ""' <<< "$tool_input" 2>/dev/null)
+                                        [[ "$_tpath" == "null" ]] && _tpath=""
+                                        [[ -n "$_tpath" ]] && _tdesc="${_tdesc} ${LIGHT_YELLOW}·${RESET} ${_tpath}"
+                                        (( ${#_tdesc} > 144 )) && _tdesc="${_tdesc:0:141}..."
+                                        ;;
+                                    *)  (( ${#_tdesc} > 80 )) && _tdesc="${_tdesc:0:77}..." ;;
+                                esac
+                                _TOOL_TREE_ENTRIES+="${tool_name}"$'\t'"$(ui_time $_ts_elapsed)"$'\t'"${_tdesc//$'\n'/ }"$'\n'
+                                _TOOL_TREE_COUNT=$((_TOOL_TREE_COUNT + 1))
+                                if [[ "$tool_name" == "edit_file" || "$tool_name" == "write_file" ]]; then
+                                    local _diff_disp="${tool_output}" _diff_max=15000
+                                    if (( ${#_diff_disp} > _diff_max )); then
+                                        _diff_disp="${_diff_disp:0:$_diff_max}"$'\n  ...[truncated]'
+                                    fi
+                                    _TOOL_DIFF_CONTENTS[_TOOL_TREE_COUNT]="$_diff_disp"
                                 fi
-                                _TOOL_DIFF_CONTENTS[_TOOL_TREE_COUNT]="$_diff_disp"
-                            fi
-                            ;;
-                    esac
+                                ;;
+                        esac
+                    fi
 
                     local is_error="false"
                     if [[ -n "${exit_code:-}" ]] && [[ "$exit_code" -ne 0 ]]; then
@@ -13284,6 +13443,25 @@ Before creating TODO items, verify the plan:
                     result=$(format_tool_result "$tool_id" "$tool_output" "$is_error")
                     results_json=$(echo "$results_json" | jq --argjson r "$result" '. + [$r]')
                 done
+
+                if [[ "${_SAFE_DENIED:-0}" == "1" ]]; then
+                    # Add deferred assistant message + denial tool_results to history
+                    if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
+                        msg_add_assistant "$_DEFERRED_CONTENT_JSON"
+                        _DEFERRED_CONTENT_JSON=""
+                    fi
+                    msg_add_tool_results "$results_json"
+                    accumulate_turn_tokens
+                    local _ts_msg; _ts_msg=$(printf '%s %s │ %s %s' \
+                        "$(ui_label '──' gray)" \
+                        "$(ui_time $(( $(_timestamp_ms) - turn_start )))" \
+                        "$(ui_tokens $TURN_INPUT_ACCUM $TURN_OUTPUT_ACCUM)" \
+                        "$(ui_label '──' gray)")
+                    _stream_emit "info" "$(jq -nc --arg c "$_ts_msg" '{content: $c}')"
+                    _log_flush
+                    save_history
+                    return 0
+                fi
 
                 # Emit tool tree as JSONL frame
                 if (( _TOOL_TREE_COUNT > 0 )); then
@@ -13636,6 +13814,7 @@ _stream_wrap_turn() {
         _saved_int=$(trap -p INT 2>/dev/null)
         trap '_bagt_interrupted=1' INT
         _bagt_interrupted=0
+        _SAFE_DENIED=0
     fi
 
     # Run turn — all _stream_emit output goes to FIFO → renderer
@@ -13738,6 +13917,8 @@ agent_loop() {
 
     _log_flush  # persist buffered startup logs before input loop
     log "DEBUG: TURN_LOOP  mode=interactive"
+
+    trap '_safe_toggle_signal' USR1
 
     while true; do
         trap '_input_int_handler' INT

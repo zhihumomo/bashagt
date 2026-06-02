@@ -801,6 +801,20 @@ cd test
 
 ---
 
+## 📝 Changelog
+
+### 2026-06-02 — Safe Mode
+
+**🛡️ Safe Mode** — a confirmation layer for destructive tool execution. When enabled (`/safe` or Shift+Tab), `write_file`, `edit_file`, `delete_file`, and `bash` are intercepted with an inline TUI confirmation dialog before execution. Denied tools return `{"status":"denied"}` that the agent is explicitly instructed not to retry (§2.1). Ideal for production servers or any scenario where you want a human-in-the-loop guardrail before the AI touches files or runs commands.
+
+Also in this update:
+- **Interrupted turn stats** — pressing Esc/Ctrl-C now displays token usage and elapsed time before the "interrupted" message
+- **Config rename** — `diff_dark_mode` → `dark_mode` (simpler, same function)
+- **Dynamic request menu height** — the Human Oversight dialog now uses actual rendered line count instead of a static estimate, fixing scroll-back artifacts
+- **Newline sanitization** — request context text strips newlines for clean single-line rendering
+
+---
+
 ## 📄 License
 
 Licensed under **Apache License 2.0**. See [LICENSE](./LICENSE) for the full text.
