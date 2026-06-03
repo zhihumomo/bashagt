@@ -1,4 +1,6 @@
 *
+!test/
+!test/**
 !bashagt
 !LICENSE
 !README.md

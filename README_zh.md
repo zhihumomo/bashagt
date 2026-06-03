@@ -6,8 +6,8 @@
 
 [![Bash](https://img.shields.io/badge/bash-4.0%2B-green?logo=gnubash)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL%20%7C%20Termux%20%7C%20iSH-blue)]()
-[![Lines](https://img.shields.io/badge/lines-15,537-orange)]()
-[![Functions](https://img.shields.io/badge/functions-425-purple)]()
+[![Lines](https://img.shields.io/badge/lines-15,725-orange)]()
+[![Functions](https://img.shields.io/badge/functions-431-purple)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 [![Status](https://img.shields.io/badge/status-preview-yellow)]()
 
@@ -67,7 +67,7 @@ bash 是 Unix 世界的公分母。它不挑硬件，不挑发行版，不挑内
 
 Bashagt 就是这个问题的答案。
 
-它是一个 **15537 行纯 bash 脚本**。没有 Node。没有 Python。没有 pip。没有 npm。没有任何你叫得上名字的运行时依赖。
+它是一个 **15725 行纯 bash 脚本**。没有 Node。没有 Python。没有 pip。没有 npm。没有任何你叫得上名字的运行时依赖。
 
 它的全部身家就是三个东西——三样在任何类 Unix 系统上都唾手可得的东西：
 
@@ -113,7 +113,7 @@ Bashagt 只是一颗种子。但它指向的方向很简单：
 
 ## ✨ 特性
 
-- 🐚 **纯 Bash 实现** — 15,537 行代码，425 个函数，无 Node/Python 运行时依赖
+- 🐚 **纯 Bash 实现** — 15,725 行代码，431 个函数，无 Node/Python 运行时依赖
 - 🖥️ **全平台覆盖** — Linux (GNU)、macOS (BSD)、WSL、Termux (Android)、iSH (iPhone/iPad)
 - 🔧 **24 个内置工具** — 文件读写编辑删除、命令执行、网页搜索、子智能体调用、TODO 管理、技能系统……
 - 🤖 **子智能体系统** — 11 个系统智能体（plan/explore/review/summarize……）+ 可自定义项目智能体
@@ -790,9 +790,28 @@ Bashagt 采用四级配置优先级（后者覆盖前者）：
 - 🔀 提交 Pull Request
 - 📖 完善文档
 
+仓库包含完整的测试套件（30 个测试脚本，约 384 KB），覆盖所有主要子系统——工具、Hook、Trace、压缩、输入、UI、SSE、技能及端到端场景。单元测试无需 API key。
+
+运行测试：
+
+```bash
+cd test
+./run_all.sh                # 单元 + 完整性测试（无需 API）
+./run_all.sh --all          # 完整套件，含 E2E（需要 API key）
+```
+
 ---
 
 ## 📝 更新日志
+
+### 2026-06-03 — 性能优化与测试套件
+
+**⚡ 性能优化** — 减少热路径中的 subshell 开销。`call_api_nonstreaming()`、`_call_agent_core()`、`agent_status()`、`build_agent_schema()`、`tool_list_agents()` 中多次连续的 `jq` 调用已合并为单次 `jq` 调用，通过 `IFS read` 批量提取。新增 `_prof_get_all()` 函数用一次 fork 替代 8 次 `_prof_get_field` 调用。`_pe_assemble_request()` 和 `build_request_body()` 去重了 `thinking` JSON 构建逻辑。
+
+本次更新还包括：
+- **SSE 旋转指示器** — 新增 `--spin-callback` 机制，在格式化 HTTP 轮询期间保持状态计时器活跃
+- **编辑文件修复** — 修正 `tool_edit_file()` 中 `BASH_REMATCH` 反向引用注释
+- **测试套件纳入仓库** — 30 个测试脚本（约 384 KB）已纳入版本控制；`.gitignore` 更新以包含 `test/`
 
 ### 2026-06-02 — 安全模式
 

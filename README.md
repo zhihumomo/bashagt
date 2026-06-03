@@ -6,8 +6,8 @@
 
 [![Bash](https://img.shields.io/badge/bash-4.0%2B-green?logo=gnubash)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL%20%7C%20Termux%20%7C%20iSH-blue)]()
-[![Lines](https://img.shields.io/badge/lines-15,537-orange)]()
-[![Functions](https://img.shields.io/badge/functions-425-purple)]()
+[![Lines](https://img.shields.io/badge/lines-15,725-orange)]()
+[![Functions](https://img.shields.io/badge/functions-431-purple)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 [![Status](https://img.shields.io/badge/status-preview-yellow)]()
 
@@ -67,7 +67,7 @@ bash is the common denominator of the Unix world. It doesn't care about hardware
 
 Bashagt is the answer.
 
-It is a **15,537-line pure bash script**. No Node. No Python. No pip. No npm. No runtime dependency you've ever heard of.
+It is a **15,725-line pure bash script**. No Node. No Python. No pip. No npm. No runtime dependency you've ever heard of.
 
 Its entire arsenal consists of three things — three things that are everywhere on any Unix-like system:
 
@@ -113,7 +113,7 @@ Maybe when this vision becomes reality, people will look back at "you need Node 
 
 ## ✨ Features
 
-- 🐚 **Pure Bash** — 15,537 lines, 425 functions, zero Node/Python runtime dependencies
+- 🐚 **Pure Bash** — 15,725 lines, 431 functions, zero Node/Python runtime dependencies
 - 🖥️ **Cross-Platform** — Linux (GNU), macOS (BSD), WSL, Termux (Android), iSH (iPhone/iPad)
 - 🔧 **24 Built-in Tools** — file read/write/edit/delete, command execution, web search, sub-agent delegation, TODO management, skill system…
 - 🤖 **Sub-Agent System** — 11 system agents (plan/explore/review/summarize…) + customizable project agents
@@ -792,16 +792,28 @@ The project is currently in **preview** — features are iterating rapidly and b
 
 Developer reference: see [`CLAUDE.md`](./CLAUDE.md) for the complete developer documentation.
 
+The repository includes a comprehensive test suite (30 test scripts, ~384 KB) covering all major subsystems — tools, hooks, trace, compression, input, UI, SSE, skills, and end-to-end scenarios. No API key is needed for unit tests.
+
 Run tests:
 
 ```bash
 cd test
-./run_all.sh
+./run_all.sh                # unit + integrity tests (no API needed)
+./run_all.sh --all          # full suite including E2E (requires API key)
 ```
 
 ---
 
 ## 📝 Changelog
+
+### 2026-06-03 — Performance & Test Suite
+
+**⚡ Performance Optimization** — reduced subshell overhead across the hot path. Multiple sequential `jq` calls in `call_api_nonstreaming()`, `_call_agent_core()`, `agent_status()`, `build_agent_schema()`, and `tool_list_agents()` have been consolidated into single `jq` invocations with batch extraction via `IFS read`. New `_prof_get_all()` function replaces 8 `_prof_get_field` calls with a single fork. `_pe_assemble_request()` and `build_request_body()` deduplicated `thinking` JSON construction.
+
+Also in this update:
+- **SSE spinner tick** — new `--spin-callback` mechanism keeps the status timer alive during format HTTP polling
+- **Edit file fix** — corrected `BASH_REMATCH` backreference comment in `tool_edit_file()` multi-occurrence check
+- **Test suite in repository** — 30 test scripts (~384 KB) now tracked in version control; `.gitignore` updated to include `test/`
 
 ### 2026-06-02 — Safe Mode
 

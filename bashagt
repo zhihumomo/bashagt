@@ -6130,17 +6130,18 @@ ${AGENT_DESCRIPTIONS}"
 
 # ── Dynamic context message (always rebuilt, placed as messages[0]) ──
 _pe_assemble_context() {
-    local memory_ctx todo_ctx ctx _git
+    local memory_ctx todo_ctx ctx _git _os _arch _time
     _git=$(git rev-parse --git-dir 2>/dev/null >/dev/null && echo yes || echo no)
     memory_ctx=$(build_memory_context 2>/dev/null) || true
     todo_ctx=$(build_todo_context 2>/dev/null) || true
+    IFS=$'\t' read -r _os _arch _time < <(printf '%s\t%s\t%s' "$(uname -s)" "$(uname -m)" "$(date '+%Y-%m-%d %H:%M')")
     ctx=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
-        "Working directory: $(pwd)" \
+        "Working directory: $PWD" \
         "Git repository: $_git" \
-        "Platform: $(uname -s) ($(uname -m))" \
+        "Platform: $_os ($_arch)" \
         "Shell: ${SHELL##*/}" \
         "Model: ${BASHAGT_MODEL:-unknown}" \
-        "Time: $(date '+%Y-%m-%d %H:%M')")
+        "Time: $_time")
     [[ -n "$memory_ctx" ]] && ctx+=$'\n\n'"$memory_ctx"
     [[ -n "$todo_ctx" ]] && ctx+=$'\n\n'"$todo_ctx"
 
@@ -6303,6 +6304,7 @@ _pe_assemble_request() {
     local _emit_markers="${6:-0}"
     local _sys_json="${7:-}"
     local _tools_json="${8:-}"
+    local _proto="${9:-anthropic}"
     local _tmp
     _tmp=$(_mktemp_dir /tmp/bashagt_det.XXXXXX)
     if [[ -z "$_tmp" ]] || [[ ! -d "$_tmp" ]]; then
@@ -6347,43 +6349,31 @@ _pe_assemble_request() {
     # JSON field order: tools → system → messages (Anthropic-mandated cache prefix order).
     # tools[-1] cache_control covers tools; system[-1] covers tools+system;
     # message bp marker covers tools+system+msg_prefix.
-    local full_msgs
-    full_msgs=$(_jq_tempfile "$_tmp" \
-        '$prefix[0] + [$dyn[0]] + $tail[0]' \
+    local thinking_json
+    if (( tb > 0 )); then
+        thinking_json="{\"budget_tokens\":$tb,\"type\":\"enabled\"}"
+    else
+        thinking_json='{"type":"disabled"}'
+    fi
+    local _body_file="$_tmp/body.json"
+    _jq_tempfile "$_tmp" \
+        '{model:$model, max_tokens:$max_tokens, tools:$tools[0],
+          system:$system[0], messages:($prefix[0] + [$dyn[0]] + $tail[0]),
+          stream:$stream, thinking:$thinking}' \
+        --arg model "$model" \
+        --argjson max_tokens "$max_tokens" \
+        --json tools "$tools_json" \
+        --json system "$sys_json" \
         --json dyn "$dyn_msg" \
         --json prefix "$msg_prefix_json" \
-        --json tail "$tail_json")
-
-    local _body_file="$_tmp/body.json"
-    if (( tb > 0 )); then
-        _jq_tempfile "$_tmp" \
-            '{model:$model, max_tokens:$max_tokens, tools:$tools[0],
-              system:$system[0], messages:$messages[0], stream:$stream,
-              thinking:{budget_tokens:$thinking_budget, type:"enabled"}}' \
-            --arg model "$model" \
-            --argjson max_tokens "$max_tokens" \
-            --json tools "$tools_json" \
-            --json system "$sys_json" \
-            --json messages "$full_msgs" \
-            --argjson stream "$stream" \
-            --argjson thinking_budget "$tb" > "$_body_file"
-    else
-        _jq_tempfile "$_tmp" \
-            '{model:$model, max_tokens:$max_tokens, tools:$tools[0],
-              system:$system[0], messages:$messages[0], stream:$stream,
-              thinking:{type:"disabled"}}' \
-            --arg model "$model" \
-            --argjson max_tokens "$max_tokens" \
-            --json tools "$tools_json" \
-            --json system "$sys_json" \
-            --json messages "$full_msgs" \
-            --argjson stream "$stream" > "$_body_file"
-    fi
+        --json tail "$tail_json" \
+        --argjson stream "$stream" \
+        --argjson thinking "$thinking_json" > "$_body_file"
     local _jq_rc=$?
-    if [[ "$(_prof_get_field protocol)" == "openai" ]]; then
+    if [[ "$_proto" == "openai" ]]; then
         _proto_convert_request < "$_body_file"
     else
-        cat "$_body_file"
+        printf '%s' "$(<"$_body_file")"
     fi
     rm -rf "$_tmp"
     return $_jq_rc
@@ -6409,30 +6399,23 @@ build_request_body() {
     local _body_file="$_tmp/body.json"
     local _sys_flag="--str" _sys_jq='$system'
     [[ "$_sys_json" == "1" ]] && { _sys_flag="--json"; _sys_jq='$system[0]'; }
+    local thinking_json
     if (( tb > 0 )); then
-        _jq_tempfile "$_tmp" \
-            "{model:\$model, max_tokens:\$max_tokens, tools:\$tools[0],
-              system:$_sys_jq, messages:\$messages[0], stream:\$stream,
-              thinking:{budget_tokens:\$thinking_budget, type:\"enabled\"}}" \
-            --arg model "$model" \
-            --argjson max_tokens "$max_tokens" \
-            --json tools "$tools" \
-            $_sys_flag system "$system" \
-            --json messages "$messages" \
-            --argjson stream "$stream" \
-            --argjson thinking_budget "$tb" > "$_body_file"
+        thinking_json="{\"budget_tokens\":$tb,\"type\":\"enabled\"}"
     else
-        _jq_tempfile "$_tmp" \
-            "{model:\$model, max_tokens:\$max_tokens, tools:\$tools[0],
-              system:$_sys_jq, messages:\$messages[0], stream:\$stream,
-              thinking:{type:\"disabled\"}}" \
-            --arg model "$model" \
-            --argjson max_tokens "$max_tokens" \
-            --json tools "$tools" \
-            $_sys_flag system "$system" \
-            --json messages "$messages" \
-            --argjson stream "$stream" > "$_body_file"
+        thinking_json='{"type":"disabled"}'
     fi
+    _jq_tempfile "$_tmp" \
+        "{model:\$model, max_tokens:\$max_tokens, tools:\$tools[0],
+          system:$_sys_jq, messages:\$messages[0], stream:\$stream,
+          thinking:\$thinking}" \
+        --arg model "$model" \
+        --argjson max_tokens "$max_tokens" \
+        --json tools "$tools" \
+        $_sys_flag system "$system" \
+        --json messages "$messages" \
+        --argjson stream "$stream" \
+        --argjson thinking "$thinking_json" > "$_body_file"
     local rc=$?
     if [[ "$(_prof_get_field protocol)" == "openai" ]]; then
         _proto_convert_request < "$_body_file"
@@ -6459,45 +6442,52 @@ call_api_nonstreaming() {
         return 2
     fi
 
-    # Cache profile fields as locals to avoid subshell overhead
+    # Cache profile fields as locals to avoid subshell overhead (single fork via _prof_get_all)
     local _ap_model _ap_url _ap_proto _ap_auth_h _ap_auth_px _ap_key _ap_mt _ap_tb
-    _ap_model=$(_prof_get_field model)
-    _ap_url=$(_prof_get_field api_url)
-    _ap_proto=$(_prof_get_field protocol)
-    _ap_auth_h=$(_prof_get_field auth_header)
-    _ap_auth_px=$(_prof_get_field auth_prefix)
-    _ap_key=$(_prof_get_field api_key)
-    _ap_mt=$(_prof_get_field max_tokens)
-    _ap_tb=$(_prof_get_field thinking_budget)
+    IFS=$'\t' read -r _ap_model _ap_url _ap_proto _ap_auth_h _ap_auth_px _ap_key _ap_mt _ap_tb < <(_prof_get_all)
 
     # Auto-reload external sources if changed on disk
     load_bashagt_md
     _reload_skills_if_stale
 
-    # ── Compute bp from formula each call (per-turn advance) ──
-    local _msg_count _msg_bp
-    _msg_count=$(jq 'length' <<< "$MESSAGES" 2>/dev/null || echo 0)
-    local _msg_tail="${BASHAGT_CACHE_MSG_TAIL:-2}"
+    local show_thoughts="${BASHAGT_SHOW_THINKING:-status}"
+    local _start_ts _elapsed=0 _icon _spinner_now
+    _start_ts=$(_timestamp_ms)
+    _spin_tick; _icon="$_SPIN_FRAME"
+
+    # Resolve stream emit fd (bypass for daemon/hotkey FIFO)
+    local _stm_fd=${_BYPASS_FD:-1}
+
+    # ── status_begin (same UI as SSE path) ──
+    status_begin "$(_build_status "$_icon" "Thinking..." 0 0 0)"
+    _stream_kv status_begin icon "$_icon" label "Thinking..." elapsed_str "0s" >&$_stm_fd
+
+    # ── Compute bp and tool_use check in single jq pass over MESSAGES ──
+    local _msg_count _msg_bp _bp_has_tu _msg_tail="${BASHAGT_CACHE_MSG_TAIL:-2}"
+    IFS=$'\t' read -r _msg_count _bp_has_tu < <(
+        jq -r --argjson tail "$_msg_tail" '
+            length as $n
+            | ($n - $tail - 1) as $bp0
+            | [$n,
+               (if $bp0 >= 0 and $bp0 < $n - 1 then
+                  any(.[$bp0].content[]?; .type=="tool_use")
+                else false end)]
+            | @tsv
+        ' <<< "$MESSAGES" 2>/dev/null || printf '0\tfalse'
+    )
     _msg_bp=$(( _msg_count - _msg_tail - 1 ))
     (( _msg_bp < 0 )) && _msg_bp=-1
     # Fast path: small total → extend bp to end (tail=0)
     if (( _msg_bp >= 0 && ${#MESSAGES} < 4096 )); then
         _msg_bp=$(( _msg_count - 1 ))
     fi
-
-    # Adjust breakpoint to avoid splitting tool_use/tool_result pairs.
-    # dyn_msg (context user message) is injected between prefix and tail
-    # during assembly. If bp falls on a tool_use message whose tool_result
-    # is in the next message, the context message lands between them and
-    # the API rejects the orphaned tool_use.
-    if (( _msg_bp >= 0 && _msg_bp < _msg_count - 1 )); then
-        local _bp_has_tu
-        _bp_has_tu=$(jq -r --argjson i "$_msg_bp" \
-            'any(.[$i].content[]?; .type=="tool_use")' <<< "$MESSAGES" 2>/dev/null || echo false)
-        if [[ "$_bp_has_tu" == "true" ]]; then
-            _msg_bp=$((_msg_bp - 1))
-        fi
+    # Adjust breakpoint to avoid splitting tool_use/tool_result pairs
+    if [[ "$_bp_has_tu" == "true" ]]; then
+        _msg_bp=$((_msg_bp - 1))
     fi
+
+    _spin_tick
+    status_update "$(_build_status "$_SPIN_FRAME" "Thinking..." 0 0 0)"
 
     # ── Marker emission decision in MAIN shell (subshell _CACHE_PROBE writes lost) ──
     local _emit_markers=0
@@ -6508,30 +6498,22 @@ call_api_nonstreaming() {
     local request_body _max_tok_val _sys_json
     _max_tok_val="${EFFECTIVE_MAX_TOKENS:-$_ap_mt}"
     _sys_json=$(_pe_assemble_system "$_emit_markers")  # main shell — _CC writes persist
+
+    _spin_tick
+    status_update "$(_build_status "$_SPIN_FRAME" "Thinking..." 0 0 0)"
+
     # Build tools_json in main shell so TOOLS_JSON_CACHE persists across turns.
     # Redirect to temp file to avoid $(...) subshell which would lose cache writes.
-    local _tools_json _tools_tmp; _tools_tmp=$(_mktemp_file)
+    local _tools_json _tools_tmp="$tmp_dir/tools.json"
     build_tools_json > "$_tools_tmp"
-    _tools_json=$(<"$_tools_tmp"); rm -f "$_tools_tmp"
+    _tools_json=$(<"$_tools_tmp")
     _tools_json=$(_pe_assemble_tools "$_emit_markers" "$_tools_json")
-    request_body=$(_pe_assemble_request "$_ap_model" "$_max_tok_val" "$_max_tok_val" "false" "$_msg_bp" "$_emit_markers" "$_sys_json" "$_tools_json")
+    request_body=$(_pe_assemble_request "$_ap_model" "$_max_tok_val" "$_max_tok_val" "false" "$_msg_bp" "$_emit_markers" "$_sys_json" "$_tools_json" "$_ap_proto")
     _HOOK_CONTEXT_BUFFER=""  # consumed — clear for next cycle
 
     # bp finalized — no advance state needed (computed fresh each call)
 
     log "DEBUG: [API] call_api_nonstreaming: model=$_ap_model max_tok=$_max_tok_val msgs=$(jq 'length' <<< "$MESSAGES" 2>/dev/null || echo 0) thinking=$_ap_tb"
-
-    local show_thoughts="${BASHAGT_SHOW_THINKING:-status}"
-    local _start_ts _elapsed=0 _icon _spinner_now
-    _start_ts=$(_timestamp_ms)
-    _icon=$(ui_spinner)
-
-    # Resolve stream emit fd (bypass for daemon/hotkey FIFO)
-    local _stm_fd=${_BYPASS_FD:-1}
-
-    # ── status_begin (same UI as SSE path) ──
-    status_begin "$(_build_status "$_icon" "Thinking..." 0 0 0)"
-    _stream_kv status_begin icon "$_icon" label "Thinking..." elapsed_str "0s" >&$_stm_fd
 
     # ── Background: http_post (blocking) → response file ──
     local _out_file="$tmp_dir/response.json"
@@ -6862,6 +6844,7 @@ http_sse_connect() {
             --auth-header)    _auth_hdr="$2"; shift 2 ;;
             --auth-value)     _auth_val="$2"; shift 2 ;;
             --err-file)       _err_file="$2"; shift 2 ;;
+            --spin-callback)  _sse_spin_cb="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -6910,6 +6893,7 @@ http_sse_connect() {
         while kill -0 $_curl_pid 2>/dev/null; do
             _interrupted && { kill "$_curl_pid" 2>/dev/null || true; break; }
             _poll_esc || { kill "$_curl_pid" 2>/dev/null || true; break; }
+            [[ -n "${_sse_spin_cb:-}" ]] && { $_sse_spin_cb || true; }
 
             # Read one SSE line from FIFO (50ms timeout; OS pipe buffer prevents data loss)
             if IFS= read -r -t 0.05 -u $_sse_fd _line 2>/dev/null; then
@@ -7048,8 +7032,8 @@ load_agents() {
     for name in "${!AGENTS[@]}"; do
         [[ "$name" == engram_* || "$name" == "format" || "$name" == "plan_extractor" ]] && continue
         local desc tools_hint
-        IFS=$'\t' read -r desc tools_hint < <(
-            jq -r '[.description // "", (.tools | if . and (. != []) then " [tools: "+join(", ")+"]" else "" end)] | @tsv' <<<"${AGENT_META[$name]}" 2>/dev/null
+        IFS=$'\x1f' read -r desc tools_hint < <(
+            jq -r '[.description // "", (.tools | if . and (. != []) then " [tools: "+join(", ")+"]" else "" end)] | join("")' <<<"${AGENT_META[$name]}" 2>/dev/null
         )
         AGENT_DESCRIPTIONS+="  - $name: $desc$tools_hint"$'\n'
     done
@@ -7071,24 +7055,18 @@ _call_agent_core() {
     export AGENT_SELF_NAME="$name"
     local meta="${AGENT_META[$name]:-}"
     local max_tokens thinking_budget model tools system_prompt
-    # Extract meta fields: scalars with -r, tools array with -c (single line)
-    max_tokens=$(jq -r '(.max_tokens // 512)' <<< "$meta" 2>/dev/null)
-    thinking_budget=$(jq -r '(.thinking_budget // 0)' <<< "$meta" 2>/dev/null)
-    model=$(jq -r '(.model // "")' <<< "$meta" 2>/dev/null)
-    tools=$(jq -c '(.tools // [])' <<< "$meta" 2>/dev/null)
+    # Extract all meta fields in single jq call
+    local _agent_profile _saved_prof="$_PROF_NAME"
+    IFS=$'\x1f' read -r max_tokens thinking_budget model tools _agent_profile < \
+        <(jq -r '[.max_tokens//512, .thinking_budget//0, .model//"", ((.tools//[])|@json), .profile//""] | join("")' <<< "$meta" 2>/dev/null)
 
     # ── Profile resolution for sub-agents ──
     # Chain: agent.profile > main profile > default (flat keys)
-    local _agent_profile _saved_prof="$_PROF_NAME"
-    _agent_profile=$(jq -r '(.profile // "")' <<< "$meta" 2>/dev/null)
     [[ -z "$_agent_profile" || "$_agent_profile" == "null" ]] && _agent_profile="${BASHAGT_MAIN_PROFILE:-}"
     _resolve_profile "$_agent_profile" || _resolve_profile ""
 
     # Model priority: agent.model > agent.profile.model > main.profile.model > flat.model
-    local _meta_model; _meta_model=$(jq -r '(.model // "")' <<< "$meta" 2>/dev/null)
-    if [[ -n "$_meta_model" && "$_meta_model" != "null" ]]; then
-        model="$_meta_model"
-    elif [[ -z "$model" || "$model" == "null" ]]; then
+    if [[ -z "$model" || "$model" == "null" ]]; then
         model=$(_prof_get_field model)
     fi
 
@@ -7292,9 +7270,9 @@ call_agent() {
         return 1
     fi
 
-    local _agent_model; _agent_model=$(jq -r '(.model // "")' <<< "${AGENT_META[$name]:-}" 2>/dev/null)
-    local _agent_think; _agent_think=$(jq -r '(.thinking_budget // 0)' <<< "${AGENT_META[$name]:-}" 2>/dev/null)
-    local _agent_tools; _agent_tools=$(jq -c '(.tools // [])' <<< "${AGENT_META[$name]:-}" 2>/dev/null)
+    local _agent_model _agent_think _agent_tools
+    IFS=$'\x1f' read -r _agent_model _agent_think _agent_tools < \
+        <(jq -r '[.model//"", .thinking_budget//0, ((.tools//[])|@json)] | join("")' <<< "${AGENT_META[$name]:-}" 2>/dev/null)
     local _agent_tool_count; _agent_tool_count=$(jq 'length' <<< "$_agent_tools" 2>/dev/null || echo 0)
     log "DEBUG: [AGENT] call_agent: name=$name model=${_agent_model:-$BASHAGT_MODEL} thinking=$_agent_think tools=$_agent_tool_count"
 
@@ -7331,13 +7309,14 @@ call_agent() {
 
 # Dynamic task tool schema — reflects current AGENTS
 build_agent_schema() {
-    local alist=""
-    for name in "${!AGENTS[@]}"; do
-        [[ "$name" == engram_* || "$name" == "format" || "$name" == "plan_extractor" ]] && continue
-        local desc; desc=$(echo "${AGENT_META[$name]}" | jq -r '.description // ""' 2>/dev/null)
-        alist+="$name ($desc), "
+    local _meta_json="{"; local _first=1 _n
+    for _n in "${!AGENTS[@]}"; do
+        [[ "$_n" == engram_* || "$_n" == "format" || "$_n" == "plan_extractor" ]] && continue
+        [[ $_first -eq 1 ]] && _first=0 || _meta_json+=","
+        _meta_json+="\"$_n\":${AGENT_META[$_n]}"
     done
-    alist="${alist%, }"
+    _meta_json+="}"
+    local alist; alist=$(jq -r '[to_entries[] | "\(.key) (\(.value.description // ""))"] | join(", ")' <<< "$_meta_json" 2>/dev/null)
     jq -n --arg alist "$alist" '{
         name:"agent",
         description:("Delegate multi-step work to a sub-agent. Available: \($alist). Use agent for: planning before coding, code review after coding, complex searches, or summarization. Sub-agents can use tools independently across multiple rounds."),
@@ -7772,15 +7751,17 @@ tool_list_skills() {
 
 tool_list_agents() {
     printf 'AVAILABLE SUB-AGENTS\n\n'
-    local _an
+    local _meta_json="{"; local _first=1 _an
     for _an in "${!AGENTS[@]}"; do
         [[ "$_an" == engram_* || "$_an" == "format" || "$_an" == "plan_extractor" ]] && continue
-        local _desc _tools
-        _desc=$(echo "${AGENTS[$_an]}" | jq -r '.description // ""' 2>/dev/null)
-        _tools=$(echo "${AGENTS[$_an]}" | jq -r '.tools | join(", ")' 2>/dev/null)
-        printf '  %-24s %s\n' "$_an" "$_desc"
-        [[ -n "$_tools" ]] && printf '    Tools: %s\n' "$_tools"
+        [[ $_first -eq 1 ]] && _first=0 || _meta_json+=","
+        _meta_json+="\"$_an\":${AGENT_META[$_an]}"
     done
+    _meta_json+="}"
+    while IFS=$'\t' read -r _an _desc _tools; do
+        printf '  %-24s %s\n' "$_an" "$_desc"
+        [[ -n "$_tools" && "$_tools" != "null" ]] && printf '    Tools: %s\n' "$_tools"
+    done < <(jq -r 'to_entries[] | "\(.key)\t\(.value.description // "")\t\((.value.tools // []) | join(", "))"' <<< "$_meta_json" 2>/dev/null)
     printf '\nUse agent("name", "prompt") to delegate work to one.\n'
 }
 
@@ -8278,6 +8259,7 @@ _json_unescape() {
 # ── Format streaming state (SSE callbacks run via lastpipe in parent shell) ──
 _FMT_LINEBUF=""   # line buffer: accumulate text deltas, flush on \n
 _FMT_OUTFD=1       # output file descriptor
+_FMT_SPIN_TICK_CNT=0  # throttle counter for SSE polling spinner
 _FMT_PREFIX=""     # line prefix (e.g. "  " for plan display indent)
 # Deferred status_done: emitted on first format token (after 0.2s pause)
 _FMT_DONE_LABEL="" _FMT_START_TS=0 _FMT_DONE_ITOK=0 _FMT_DONE_OTOK=0
@@ -8438,6 +8420,20 @@ ${raw}
     _FMT_LINEBUF=""
     _FMT_OUTFD="$_fd"
     _FMT_PREFIX="${prefix:-}"
+    _FMT_SPIN_TICK_CNT=0
+
+    # ── Spinner tick for SSE polling phase (keeps timer alive during format HTTP) ──
+    _fmt_spin_tick() {
+        [[ ${_FMT_START_TS:-0} -eq 0 ]] && return 0
+        [[ -z "${_FMT_DONE_LABEL:-}" ]] && return 0
+        (( _FMT_SPIN_TICK_CNT++ % 2 != 0 )) && return 0
+        local _now; _now=$(_timestamp_ms)
+        local _e=$(( _now - _FMT_START_TS ))
+        (( _e < 0 )) && _e=0
+        _spin_tick
+        _ui_time $_e
+        _stream_kv status_update icon "$_SPIN_FRAME" label "Thinking..." elapsed_str "$_UI_TIME" >&8
+    }
 
     # ── SSE streaming ──
     local _callback _av_header=()
@@ -8450,6 +8446,7 @@ ${raw}
 
     http_sse_connect "$_sa_url" "$_callback" \
         --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 120 \
+        --spin-callback _fmt_spin_tick \
         "${_av_header[@]}" \
         --header "content-type: application/json" \
         --auth-header "$_sa_auth_h" --auth-value "${_sa_auth_px}${_sa_key}" \
@@ -8794,6 +8791,19 @@ _prof_get_field() {
         name)       printf '%s' "${_PROF_NAME:-default}" ;;
         *)          printf '' ;;
     esac
+}
+
+# Single-fork batch extraction of all profile fields (avoids 8 subshells per turn)
+_prof_get_all() {
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+        "${_PROF_MODEL:-$BASHAGT_MODEL}" \
+        "${_PROF_API_URL:-$BASHAGT_API_URL}" \
+        "${_PROF_PROTOCOL:-$BASHAGT_PROTOCOL}" \
+        "${_PROF_AUTH_HEADER:-$BASHAGT_AUTH_HEADER}" \
+        "${_PROF_AUTH_PREFIX:-$BASHAGT_AUTH_PREFIX}" \
+        "${_PROF_API_KEY:-$BASHAGT_API_KEY}" \
+        "${_PROF_MAX_TOKENS:-$BASHAGT_MAX_TOKENS}" \
+        "${_PROF_THINKING_BUDGET:-$BASHAGT_THINKING_BUDGET}"
 }
 
 # ── Model Pool System ──
@@ -10373,17 +10383,21 @@ _agent_refresh_discovery() {
 # agent_status() → JSON [{name, description, status}]
 # Main agent calls this via the agent_status tool.
 agent_status() {
-    local _name _result="[" _first=1
-    for _name in "${!AGENTS[@]}"; do
-        [[ "$_name" == engram_* || "$_name" == "format" || "$_name" == "plan_extractor" ]] && continue
-        local _desc; _desc=$(echo "${AGENT_META[$_name]}" | jq -r '.description // ""' 2>/dev/null)
-        local _st="${AGENT_STATUS[$_name]:-idle}"
-        [[ $_first -eq 1 ]] && _first=0 || _result+=","
-        _result+=$(jq -n --arg name "$_name" --arg desc "$_desc" --arg st "$_st" \
-            '{name:$name, description:$desc, status:$st}')
+    local _meta_json="{"; local _first=1 _n
+    for _n in "${!AGENTS[@]}"; do
+        [[ "$_n" == engram_* || "$_n" == "format" || "$_n" == "plan_extractor" ]] && continue
+        [[ $_first -eq 1 ]] && _first=0 || _meta_json+=","
+        _meta_json+="\"$_n\":${AGENT_META[$_n]}"
     done
-    _result+="]"
-    printf '%s' "$_result"
+    _meta_json+="}"
+    jq -n -r --argjson meta "$_meta_json" --argjson status "$(
+        local _s="{"; _first=1
+        for _n in "${!AGENT_STATUS[@]}"; do
+            [[ $_first -eq 1 ]] && _first=0 || _s+=","
+            _s+="\"$_n\":\"${AGENT_STATUS[$_n]}\""
+        done
+        _s+="}"; printf '%s' "$_s"
+    )" '[($meta | to_entries[]) | {name:.key, description:(.value.description//""), status:($status[.key]//"idle")}]'
 }
 
 # ── Job Queue ──
@@ -10719,11 +10733,7 @@ BASHAGT_TRACE_TOOL=""
 
 # ── _trace_hash — compute SHA256 of content, returns hash ──
 _trace_hash() {
-    local _content="$1"
-    printf '%s' "$_content" | sha256sum 2>/dev/null | awk '{print $1}' \
-        || printf '%s' "$_content" | shasum -a 256 2>/dev/null | awk '{print $1}' \
-        || printf '%s' "$_content" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}' \
-        || cksum <<< "$_content" 2>/dev/null | awk '{printf "%s%s", $1, $2}'
+    printf '%s' "$1" | _cc_hash
 }
 
 # ── _trace_object_path — get filesystem path for a content hash ──
@@ -11580,18 +11590,13 @@ tool_edit_file() {
         return 1
     fi
 
-    # Check for multiple occurrences in original content BEFORE replacement.
-    # Uses bash regex (=~) instead of ${content#*"$old_str"} — the parameter
-    # expansion path is O(n??) on large strings (150-330s for 600KB file),
-    # while regex completes in ~15ms.  Quoted "$old_str" = literal match.
-    if [[ "$content" =~ "$old_str"([[:space:]]|[[:print:]])* ]]; then
-        local _first_rest="${BASH_REMATCH[1]}"
-        if [[ "$_first_rest" == *"$old_str"* ]]; then
-            printf 'Error: old_string appears multiple times in the file; must be unique\n'
-            return 1
-        fi
-    else
-        printf 'Error: old_string not found in file\n'
+    # Check for multiple occurrences: strip first match, check remainder.
+    # Uses parameter expansion on the suffix after the first occurrence —
+    # avoids the broken bash regex backreference (BASH_REMATCH[1] only
+    # captures the last repetition of a *-quantified group in POSIX ERE).
+    local _after_first="${content#*"$old_str"}"
+    if [[ "$_after_first" == *"$old_str"* ]]; then
+        printf 'Error: old_string appears multiple times in the file; must be unique\n'
         return 1
     fi
 
@@ -13100,13 +13105,15 @@ Before creating TODO items, verify the plan:
                 log "DEBUG: TURN_END  stop=interrupted rounds=$_round tok_in=$TURN_INPUT_TOKENS tok_out=$TURN_OUTPUT_TOKENS"
                 save_history
                 accumulate_turn_tokens
+                printf '\r\033[K\n' >&2
+                STATUS_ACTIVE=0
+                _stream_emit "warning" "$(jq -nc '{content: "Turn interrupted"}')"
                 local _ts_msg; _ts_msg=$(printf '%s %s │ %s %s' \
                     "$(ui_label '──' gray)" \
                     "$(ui_time $(( $(_timestamp_ms) - turn_start )))" \
                     "$(ui_tokens $TURN_INPUT_ACCUM $TURN_OUTPUT_ACCUM)" \
                     "$(ui_label '──' gray)")
                 _stream_emit "info" "$(jq -nc --arg c "$_ts_msg" '{content: $c}')"
-                _stream_emit "warning" "$(jq -nc '{content: "Turn interrupted (Esc/Ctrl-C)"}')"
                 return 0
             fi
 
