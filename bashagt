@@ -1170,6 +1170,17 @@ _stream_render() {
     _type="${_type%%\"*}"
     [[ -z "$_type" ]] && { printf '%s\n' "$_line"; return 0; }
 
+    # ── Pipeline diagnostics: log every frame type + first text preview ──
+    case "$_type" in
+        done)   log "DEBUG: [RENDER] type=done" ;;
+        text)   log "DEBUG: [RENDER] type=text len=${#_line}" ;;
+        tool_start) log "DEBUG: [RENDER] type=tool_start" ;;
+        tool_end)   log "DEBUG: [RENDER] type=tool_end" ;;
+        tool_tick|tool_output) ;;  # high-frequency, skip
+        status_begin|status_update) ;;  # high-frequency, skip
+        *)      log "DEBUG: [RENDER] type=$_type" ;;
+    esac
+
     case "$_type" in
         done) return 1 ;;
         text)
@@ -6990,6 +7001,7 @@ http_sse_connect() {
         # Open FIFO read-end on a dynamic fd (avoids collision with fd 8/9)
         local _sse_fd
         exec {_sse_fd}< "$_sse_fifo"
+        log "DEBUG: [SSE] dyn_fd=$_sse_fd fd8=$( [[ -e /proc/self/fd/8 ]] && echo ok || echo MISSING ) fd9=$( [[ -e /proc/self/fd/9 ]] && echo ok || echo MISSING )"
 
         # Polling loop: keyboard + SSE FIFO
         while kill -0 $_curl_pid 2>/dev/null; do
@@ -13908,6 +13920,7 @@ _stream_wrap_turn() {
     exec 1>"$_fifo"
     exec 8>&1
     _BYPASS_FD=8
+    log "DEBUG: [FIFO] setup fd8=$( [[ -e /proc/self/fd/8 ]] && echo ok || echo MISSING ) fd9=$( [[ -e /proc/self/fd/9 ]] && echo ok || echo MISSING ) renderer_pid=$_renderer_pid fifo=$_fifo"
 
     # Interactive mode: replace INT trap with soft-interrupt for the API call
     local _saved_int
@@ -13937,6 +13950,7 @@ _stream_wrap_turn() {
     _BYPASS_FD=1
     exec 1>&9 9>&- 8>&-
     local _exec_rc=$?
+    log "DEBUG: [FIFO] teardown rc=$_exec_rc fd1=$( [[ -e /proc/self/fd/1 ]] && echo ok || echo MISSING ) fd8=$( [[ -e /proc/self/fd/8 ]] && echo closed || echo STILL_OPEN )"
     (( _was_errexit )) && set -e
     if (( _exec_rc != 0 )); then
         exec 1>&2
