@@ -33,7 +33,9 @@ _green() { printf 'PASS:%s\n' "$*"; }
 _red() { printf 'FAIL:%s|%s|%s\n' "$1" "$2" "$3"; }
 
 BOLD=""; RESET=""; DIM=""; GREEN=""; RED=""; CYAN=""; YELLOW=""; GRAY=""
-LIGHT_GREEN=""; DOT_SEQ=(); _DOT_PHASE=0; SPINNER_LEN=${#SPINNER[@]}
+LIGHT_GREEN=""; DOT_SEQ=(); _DOT_PHASE=0
+SPINNER=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+SPINNER_LEN=${#SPINNER[@]}
 _SPIN_FRAME=""
 _DOT_FRAME=""
 
@@ -52,19 +54,20 @@ _spin_tick
 [[ "$_SPIN_FRAME" == "${SPINNER[0]}" ]] && _green "T2: _spin_tick first frame (${SPINNER[0]})" \
     || _red "T2: tick" "${SPINNER[0]}" "$_SPIN_FRAME"
 
-# T3: 10 ticks → wraps around
+# T3: 10 ticks → wraps around (last frame read is SPINNER[9], index wraps to 0)
 SPINNER_IDX=0
 for i in $(seq 1 10); do _spin_tick >/dev/null 2>&1; done
-[[ "$_SPIN_FRAME" == "${SPINNER[0]}" ]] && _green "T3: 10 ticks wraps to first" \
-    || _red "T3: wrap" "${SPINNER[0]}" "$_SPIN_FRAME"
+[[ "$_SPIN_FRAME" == "${SPINNER[9]}" ]] && _green "T3: 10 ticks wraps to first" \
+    || _red "T3: wrap" "${SPINNER[9]}" "$_SPIN_FRAME"
 
-# T4: 10 tick cycle visits all frames
+# T4: 10 tick cycle visits all 10 unique frames
 SPINNER_IDX=0
 _seen=""
 for i in $(seq 1 10); do
     _spin_tick >/dev/null 2>&1
     _seen+="$_SPIN_FRAME "
 done
+_seen="${_seen% }"
 _cnt=$(echo "$_seen" | tr ' ' '\n' | sort -u | wc -l)
 [[ $_cnt -eq 10 ]] && _green "T4: 10 unique frames in cycle" \
     || _red "T4: unique" "10" "$_cnt seen=$_seen"

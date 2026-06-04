@@ -69,6 +69,7 @@ _DEFAULT_SP_IDENTITY='━━━━━━━━━━━━━━━━━━━�
 - You operate as a CLI coding agent with filesystem access.
 - Your output will be automatically formatted for terminal display. Focus on content, not presentation.
 - Be concise, direct, and efficient. Start responses with the answer — code, a file path, a finding, or a direct statement. Omit conversational filler entirely: no "Sure!", "Here you go:", "Let me help you with that.", no greetings, no sign-offs.
+- Reasoning Effort: Absolute maximum with no shortcuts permitted. You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios. Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.
 
 '
 _DEFAULT_SP_SAFETY='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3861,6 +3862,10 @@ _in_buf_reposition() {
     if (( $(_str_display_width "$_pre_clean") + $(_str_display_width "$line_content") > TERM_WIDTH )); then
         _in_buf_redraw; return
     fi
+    # If old render had auto-wrapped rows, full redraw is safer
+    if (( _IN_DISPLAY_LINES > $(_in_display_lines) )); then
+        _in_buf_redraw; return
+    fi
     local row_diff=$((_IN_CURSOR_ROW - target_row))
     [[ $row_diff -gt 0 ]] && printf '\033[%dA' "$row_diff"
     [[ $row_diff -lt 0 ]] && printf '\033[%dB' "$((-row_diff))"
@@ -3875,6 +3880,11 @@ _in_buf_redraw_line() {
     local pre="$_IN_PROMPT_CONT"; [[ $row -eq 0 ]] && pre="$_IN_PROMPT"
     local _pre_clean; _pre_clean=$(_strip_ansi_sgr "$pre")
     if (( $(_str_display_width "$_pre_clean") + $(_str_display_width "$line_content") > TERM_WIDTH )); then
+        _in_buf_redraw; return
+    fi
+    # If old render had auto-wrapped rows, a single-row \033[K can't
+    # clear them — fall back to full redraw with proper \033[J cleanup.
+    if (( _IN_DISPLAY_LINES > $(_in_display_lines) )); then
         _in_buf_redraw; return
     fi
     local row_diff=$((_IN_CURSOR_ROW - row))
@@ -4375,7 +4385,7 @@ _in_buf_redraw() {
     # multi-line shrinkage. Pasting (same or more lines) needs no clear.
     if (( _old_lines > _IN_DISPLAY_LINES )); then
         local _vacated=$((_IN_DISPLAY_LINES - _IN_CURSOR_ROW))
-        printf '\033[%dB\033[J' "$_vacated"
+        printf '\033[%dB\r\033[J' "$_vacated"
         printf '\033[%dA' "$_vacated"
     fi
 }
@@ -4629,7 +4639,7 @@ _input_init() {
     _IN_LINE=""
     _IN_POS=0
     _IN_PROMPT="  ›"
-    _IN_PROMPT_CONT="  ⋯"
+    _IN_PROMPT_CONT="  ⋯ "
     _IN_DISPLAY_LINES=1
     _IN_PASTING=0
     _IN_COMPLETER=""
