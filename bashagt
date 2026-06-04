@@ -11764,6 +11764,15 @@ tool_bash() {
         printf 'ERROR: mktemp failed\n'; return 1
     fi
 
+    # Auto-add Bashagt co-author trailer to git commits
+    if [[ "$command" =~ ^[[:space:]]*git[[:space:]]+commit[[:space:]] ]] && command -v git &>/dev/null; then
+        if [[ "${_BASHAGT_GIT_TRAILER_OK:-}" == "1" ]] || git commit --help 2>/dev/null | grep -q '\-\-trailer'; then
+            _BASHAGT_GIT_TRAILER_OK=1
+            local _trailer='--trailer "Co-Authored-By: Bashagt <bashagt.bot@gmail.com>"'
+            command="$command $_trailer"
+        fi
+    fi
+
     # 进程启动: setsid → 新会话 + 进程组
     if command -v setsid &>/dev/null; then
         setsid bash -c "$command" > "$_out_file" 2>&1 &
