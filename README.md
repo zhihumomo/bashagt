@@ -124,7 +124,8 @@ Maybe when this vision becomes reality, people will look back at "you need Node 
 - 📦 **4-Tier Context Compression** — automatic management of conversations exceeding 250KB
 - ↩️ **Trace/Undo** — content-addressed file modification tracking with rollback
 - 🔄 **Adaptive Agent Loop** — three safeguard mechanisms against infinite loops
-- ⌨️ **Full Readline** — Unicode/CJK support, multi-line editing, history search, Tab completion
+- 🧠 **Exhaustive Reasoning** — system prompt mandates maximum reasoning effort: full problem decomposition, rigorous logic stress-testing against all edge cases, fully documented deliberation process
+- ⌨️ **Full Readline** — Unicode/CJK support, multi-line editing, history search, Tab completion, robust auto-wrap rendering
 - 📱 **Termux-API Integration** — control Android sensors, camera, SMS, and more from your phone
 - 🔄 **Self-Evolution** — Bashagt can read and modify its own source code. Add features through conversation: "add a --version flag" — it reads, edits, verifies, done
 
