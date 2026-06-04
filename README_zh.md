@@ -804,6 +804,19 @@ cd test
 
 ## 📝 更新日志
 
+### 2026-06-04 — 架构加固与 Bug 修复
+
+**🏗️ 架构** — `init_system_dirs()` (831→21 行) 拆分为 `_init_settings_template()` 和 `_init_system_agents()`。新增 JSON 消息访问门面 — `msg_count()`、`msg_last_user_text()`、`msg_replace_all()` — 统一消息数组读写入口。`_cc_invalidate msgs` 集中到 `msg_add_*` 和 `msg_replace_all` 中，消除分散的缓存失效调用。`_turn_init()` 从 `run_turn()` 中提取为独立函数（48 行）。`_turn_flush_feedback()` 和 `_turn_flush_assistant()` 将 10 处分散的延迟读取收敛为 2 个专用刷新函数。`http_retry()` 指数退避 + 全抖动包装 S5 压缩 HTTP 调用。
+
+**🐛 Bug 修复** — 关键：`_turn_flush_assistant`/`msg_add_tool_results` 调用顺序修复 — assistant(tool_use) 现在正确排在 user(tool_result) 之前，避免 API 400 "orphaned tool_result" 错误。`_compress_api()` L3 切分点现在感知配对完整性；自动调整 `old_count` 避免切割 tool_use/tool_result 对。PASTE_END 转义序列恢复：超时截断的粘贴括号用更长超时重试读取，防止 `_IN_PASTING` 粘滞状态和永久性界面冻结。`tool_edit_file()` 重复检测改用直接双匹配正则（单次 pass，无 BASH_REMATCH 捕获 bug）。`_trace_hash()` 恢复委托给 `_cc_hash`。修复 `run_turn()` pre_turn 钩子上下文中未绑定变量 `$trimmed`（缺少下划线前缀）。
+
+**🎨 UX** — SSE `--spin-callback` + `_fmt_spin_tick` 轮询计时器恢复；格式化 HTTP 流式传输期间 spinner 保持实时计时。提前 spinner 帧插入恢复：spinner 在函数入口激活，覆盖 HTTP 请求前约 500ms 的计算间隙。
+
+本次更新还包括：
+- `_input_cleanup()` 与 daemon/MCP/history 生命周期解耦
+- `P2-3`：移除硬编码 `MEM_NET_DIR`/`TODO_FILE` 回退路径
+- 测试套件修复：`test_trace.sh`（Windows 路径）、`test_input_history.sh`（动态行号提取）、`test_paste_bugs.sh`（Bug B 验证）、`test_slash_handlers.sh`（消息门面 mock）
+
 ### 2026-06-03 — 性能优化与测试套件
 
 **⚡ 性能优化** — 减少热路径中的 subshell 开销。`call_api_nonstreaming()`、`_call_agent_core()`、`agent_status()`、`build_agent_schema()`、`tool_list_agents()` 中多次连续的 `jq` 调用已合并为单次 `jq` 调用，通过 `IFS read` 批量提取。新增 `_prof_get_all()` 函数用一次 fork 替代 8 次 `_prof_get_field` 调用。`_pe_assemble_request()` 和 `build_request_body()` 去重了 `thinking` JSON 构建逻辑。

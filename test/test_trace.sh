@@ -15,10 +15,12 @@ _pass() { PASS=$((PASS+1)); green "$1"; }
 _fail() { FAIL=$((FAIL+1)); red "$1"; }
 
 # ── Setup: extract trace functions from bashagt ──
-TRACE_START=$(grep -n "^# SECTION 7f: Trace System" /mnt/d/Self/Proj/bashagt/bashagt | cut -d: -f1)
-TRACE_END=$(grep -n "^# SECTION 8: Tool Definitions" /mnt/d/Self/Proj/bashagt/bashagt | cut -d: -f1)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASHAGT="$SCRIPT_DIR/../bashagt"
+TRACE_START=$(grep -n "^# SECTION 7f: Trace System" "$BASHAGT" | cut -d: -f1)
+TRACE_END=$(grep -n "^# SECTION 8: Tool Definitions" "$BASHAGT" | cut -d: -f1)
 TRACE_END=$((TRACE_END - 1))
-sed -n "${TRACE_START},${TRACE_END}p" /mnt/d/Self/Proj/bashagt/bashagt > "$TEST_DIR/trace_funcs.sh"
+sed -n "${TRACE_START},${TRACE_END}p" "$BASHAGT" > "$TEST_DIR/trace_funcs.sh"
 
 # ── Minimal dependencies ──
 _mktemp_file() { mktemp "$@"; }

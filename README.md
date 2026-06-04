@@ -806,6 +806,19 @@ cd test
 
 ## 📝 Changelog
 
+### 2026-06-04 — Architecture Hardening & Bug Fixes
+
+**🏗️ Architecture** — `init_system_dirs()` (831→21 lines) decomposed into `_init_settings_template()` and `_init_system_agents()`. New JSON message access facade — `msg_count()`, `msg_last_user_text()`, `msg_replace_all()` — single source of truth for message array reads/writes. `_cc_invalidate msgs` centralized into `msg_add_*` and `msg_replace_all`, eliminating scattered cache invalidation. `_turn_init()` extracted from `run_turn()` (48 lines → standalone function). `_turn_flush_feedback()` and `_turn_flush_assistant()` converge 10 deferred-read sites into 2 dedicated flush functions. `http_retry()` with exponential backoff + full jitter wraps S5 compression HTTP calls.
+
+**🐛 Bug Fixes** — Critical: `_turn_flush_assistant`/`msg_add_tool_results` ordering restored — assistant(tool_use) now correctly precedes user(tool_result) in message array, preventing API 400 "orphaned tool_result" errors. `_compress_api()` L3 split-point now pair-aware; adjusts `old_count` to avoid breaking tool_use/tool_result pairs. PASTE_END escape sequence recovery: timeout-truncated paste brackets retry with longer timeout, preventing `_IN_PASTING` sticky-state and permanent redraw suppression. `tool_edit_file()` duplicate detection uses direct double-match regex (single-pass, no BASH_REMATCH capture bug). `_trace_hash()` restored to `_cc_hash` delegation. Unbound variable `$trimmed` (missing underscore prefix) fixed in `run_turn()` pre_turn hook context.
+
+**🎨 UX** — SSE `--spin-callback` + `_fmt_spin_tick` polling timer restored; spinner keeps live elapsed counter during format HTTP streaming. Early spinner frame insertion restored: spinner activates at function entry to cover ~500ms computation gap before HTTP request.
+
+Also in this update:
+- `_input_cleanup()` decoupled from daemon/MCP/history lifecycle
+- `P2-3`: hardcoded `MEM_NET_DIR`/`TODO_FILE` fallback paths removed
+- Test suite fixes: `test_trace.sh` (Windows paths), `test_input_history.sh` (dynamic line extraction), `test_paste_bugs.sh` (Bug B verification), `test_slash_handlers.sh` (msg facade mocks)
+
 ### 2026-06-03 — Performance & Test Suite
 
 **⚡ Performance Optimization** — reduced subshell overhead across the hot path. Multiple sequential `jq` calls in `call_api_nonstreaming()`, `_call_agent_core()`, `agent_status()`, `build_agent_schema()`, and `tool_list_agents()` have been consolidated into single `jq` invocations with batch extraction via `IFS read`. New `_prof_get_all()` function replaces 8 `_prof_get_field` calls with a single fork. `_pe_assemble_request()` and `build_request_body()` deduplicated `thinking` JSON construction.

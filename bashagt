@@ -2716,6 +2716,12 @@ init_system_dirs() {
         _install_symlink
     fi
 
+    _init_settings_template
+    _init_system_agents
+}
+
+# ── Generate default settings.json + model_pool.json (idempotent) ──
+_init_settings_template() {
     if [[ ! -f "$HOME/.bashagt/settings.json" ]]; then
         cat > "$HOME/.bashagt/settings.json" << 'SETJSON'
 {
@@ -2817,7 +2823,10 @@ SETJSON
         jq -n '{_config_hash: "", _updated_at: "", models: {}}' > "$HOME/.bashagt/model_pool.json"
         log "Created initial model_pool.json"
     fi
+}
 
+# ── Generate default system agents (idempotent) ──
+_init_system_agents() {
     # Create missing default system agents
     mkdir -p "$HOME/.bashagt/agents"
     if [[ ! -f "$HOME/.bashagt/agents/agent_manager.md" ]]; then
@@ -3748,6 +3757,14 @@ _input_read_key() {
                 # O is NOT a terminator — SS3 sequences are ESC O <letter>
                 [[ "$ch" == [A-NP-Za-z~] ]] && break
             done
+            # If timeout truncated a bracketed-paste sequence ([200~ or [201~),
+            # try one more read with longer timeout to recover the terminating ~
+            if [[ "$seq" == '[200' || "$seq" == '[201' ]]; then
+                local _recovery_ch
+                if IFS= read -r -s -t 0.05 -n1 _recovery_ch 2>/dev/null; then
+                    seq+="$_recovery_ch"
+                fi
+            fi
             case "$seq" in
                 '[D')     _INPUT_KEY_RET='LEFT' ;;
                 '[C')     _INPUT_KEY_RET='RIGHT' ;;
@@ -4694,9 +4711,8 @@ _input_cleanup() {
     printf '\033[?2004l'
     stty echo 2>/dev/null || true
     trap - WINCH
-    # Restore the main EXIT trap (overwritten by _input_init) so
-    # _worker_shutdown / mcp_shutdown / save_history fire on exit.
-    trap '_hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; _worker_shutdown; mcp_shutdown; save_history' EXIT
+    # EXIT trap restoration (daemon/MCP/history) is handled by main()'s
+    # centralized EXIT trap — _input_cleanup only manages terminal state.
 
     # Save history (Phase 2)
     if [[ -n "${_IN_HIST_FILE:-}" ]]; then
@@ -5157,14 +5173,13 @@ save_history() {
 
 load_history() {
     if [[ -f "$BASHAGT_HISTORY_FILE" ]]; then
-        MESSAGES=$(jq '[.[] | select(.content != [] and .content != "" and .content != null)]' "$BASHAGT_HISTORY_FILE" 2>/dev/null || echo '[]')
+        msg_replace_all "$(jq '[.[] | select(.content != [] and .content != "" and .content != null)]' "$BASHAGT_HISTORY_FILE" 2>/dev/null || echo '[]')"
         local filtered
-        filtered=$(jq 'length' <<< "$MESSAGES" 2>/dev/null || echo 0)
+        filtered=$(msg_count)
         log "DEBUG: [HIST] loaded $filtered messages"
     else
-        MESSAGES='[]'
+        msg_replace_all '[]'
     fi
-    _cc_invalidate msgs
 }
 
 msg_add_user_text() {
@@ -5172,16 +5187,16 @@ msg_add_user_text() {
     _new=$(jq --arg text "$text" '. + [{"role":"user","content":$text}]' <<< "$MESSAGES" 2>/dev/null) \
         && MESSAGES="$_new" \
         || log "WARN: msg_add_user_text jq failed — message not added" >&2
+    _cc_invalidate msgs
 }
 
 msg_add_assistant() {
     local content_json="$1" _new
-    # Keep full content including thinking blocks — content is stable once
-    # written, so caching is unaffected. Sub-agents do the same (L7307).
     _new=$(jq --argjson content "$content_json" \
         '. + [{"role":"assistant","content":$content}]' 2>/dev/null <<< "$MESSAGES") \
         && MESSAGES="$_new" \
         || log "WARN: msg_add_assistant jq failed — message not added" >&2
+    _cc_invalidate msgs
 }
 
 msg_add_tool_results() {
@@ -5190,6 +5205,23 @@ msg_add_tool_results() {
         '. + [{"role":"user","content":$results}]' 2>/dev/null <<< "$MESSAGES") \
         && MESSAGES="$_new" \
         || log "WARN: msg_add_tool_results jq failed — message not added" >&2
+    _cc_invalidate msgs
+}
+
+# ── Message read accessors — single source of truth for JSON structure ──
+msg_count() {
+    jq 'length' <<< "$MESSAGES" 2>/dev/null || echo 0
+}
+
+msg_last_user_text() {
+    jq -r '[.[] | select(.role=="user")] | last | .content // ""' <<< "$MESSAGES" 2>/dev/null
+}
+
+# Replace entire message array (for compression, /clear). Calls _cc_invalidate msgs.
+msg_replace_all() {
+    local new_json="$1"
+    MESSAGES="$new_json"
+    _cc_invalidate msgs
 }
 
 # ============================================================================
@@ -5471,6 +5503,23 @@ _compress_api() {
     (( total <= keep )) && return 0
     local old_count=$(( total - keep ))
 
+    # Adjust split point to avoid breaking tool_use/tool_result pairs.
+    # If the split falls between a tool_use (assistant msg) and its
+    # tool_result (next user msg), the tool_use gets discarded by the
+    # summary and the API rejects the orphaned tool_result.
+    if (( old_count > 0 && old_count < total - 2 )); then
+        local _pair_check; _pair_check=$(jq -r --argjson n "$old_count" '
+            if .[$n].role == "user" and
+               ([.[$n].content[]? | select(.type == "tool_result")] | length > 0) and
+               ([.[$n-1].content[]? | select(.type == "tool_use")] | length > 0)
+            then "adjust"
+            else "ok" end
+        ' 2>/dev/null <<< "$MESSAGES")
+        if [[ "$_pair_check" == "adjust" ]]; then
+            old_count=$((old_count + 1))
+        fi
+    fi
+
     # ── Common: profile resolution ──
     local _saved_prof="$_PROF_NAME"
     local _cpr_profile="${BASHAGT_COMPRESS_PROFILE:-${BASHAGT_MAIN_PROFILE:-}}"
@@ -5537,7 +5586,7 @@ _compress_api() {
                 stream: false, thinking: {type: "disabled"}} | .[$mtf] = 8192')
 
             local _summary _out; _out=$(_mktemp_file /tmp/bashagt_cpr.XXXXXX)
-            if http_post "$_cpr_url" "$_out" --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 60 \
+            if http_retry 2 100 5000 http_post "$_cpr_url" "$_out" --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 60 \
                 --body "$_body" --auth-header "$_cpr_auth_h" --auth-value "${_cpr_auth_px}${_cpr_key}" \
                 "${_cpr_av_arg[@]}" --header "content-type: application/json" && [[ -s "$_out" ]]; then
                 _summary=$(< "$_out")
@@ -5562,7 +5611,7 @@ _compress_api() {
                         model: $m, messages: [{role:"user",content:("Summarize the following conversation into a brief paragraph. Preserve: key decisions, file paths touched, code changes made, errors encountered, and unresolved questions.\n\n"+.)}],
                         stream: false, thinking: {type: "disabled"}} | .[$mtf] = 8192')
                     local _rsum _rout; _rout=$(_mktemp_file /tmp/bashagt_cpr.XXXXXX)
-                    if http_post "$_cpr_url" "$_rout" --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 60 \
+                    if http_retry 2 100 5000 http_post "$_cpr_url" "$_rout" --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 60 \
                         --body "$_rbody" --auth-header "$_cpr_auth_h" --auth-value "${_cpr_auth_px}${_cpr_key}" \
                         "${_cpr_av_arg[@]}" --header "content-type: application/json" && [[ -s "$_rout" ]]; then
                         _rsum=$(< "$_rout")
@@ -5607,7 +5656,7 @@ _compress_api() {
         stream: false, thinking: {type: "disabled"}} | .[$mtf] = 8192')
 
     local _summary _out; _out=$(_mktemp_file /tmp/bashagt_cpr.XXXXXX)
-    if http_post "$_cpr_url" "$_out" --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 60 \
+    if http_retry 2 100 5000 http_post "$_cpr_url" "$_out" --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 60 \
         --body "$_body" --auth-header "$_cpr_auth_h" --auth-value "${_cpr_auth_px}${_cpr_key}" \
         "${_cpr_av_arg[@]}" --header "content-type: application/json" && [[ -s "$_out" ]]; then
         _summary=$(< "$_out")
@@ -5631,7 +5680,7 @@ _compress_api() {
                 model: $m, messages: [{role:"user",content:("Summarize the following conversation into a brief paragraph. Preserve: key decisions, file paths touched, code changes made, errors encountered, and unresolved questions.\n\n"+.)}],
                 stream: false, thinking: {type: "disabled"}} | .[$mtf] = 8192')
             local _rsum _rout; _rout=$(_mktemp_file /tmp/bashagt_cpr.XXXXXX)
-            if http_post "$_cpr_url" "$_rout" --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 60 \
+            if http_retry 2 100 5000 http_post "$_cpr_url" "$_rout" --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 60 \
                 --body "$_rbody" --auth-header "$_cpr_auth_h" --auth-value "${_cpr_auth_px}${_cpr_key}" \
                 "${_cpr_av_arg[@]}" --header "content-type: application/json" && [[ -s "$_rout" ]]; then
                 _rsum=$(< "$_rout")
@@ -6474,6 +6523,16 @@ call_api_nonstreaming() {
     load_bashagt_md
     _reload_skills_if_stale
 
+    # ── Start spinner early — covers bp/tools/request computation (~300-500ms) ──
+    local show_thoughts="${BASHAGT_SHOW_THINKING:-status}"
+    local _start_ts _elapsed=0 _icon _spinner_now
+    _start_ts=$(_timestamp_ms)
+    _icon=$(ui_spinner)
+
+    local _stm_fd=${_BYPASS_FD:-1}
+    status_begin "$(_build_status "$_icon" "Thinking..." 0 0 0)"
+    _stream_kv status_begin icon "$_icon" label "Thinking..." elapsed_str "0s" >&$_stm_fd
+
     # ── Compute bp from formula each call (per-turn advance) ──
     local _msg_count _msg_bp
     _msg_count=$(jq 'length' <<< "$MESSAGES" 2>/dev/null || echo 0)
@@ -6499,6 +6558,9 @@ call_api_nonstreaming() {
         fi
     fi
 
+    _spin_tick
+    status_update "$(_build_status "$_SPIN_FRAME" "Thinking..." 0 0 0)"
+
     # ── Marker emission decision in MAIN shell (subshell _CACHE_PROBE writes lost) ──
     local _emit_markers=0
     if [[ "${_CACHE_PROBE[state]:-disabled}" != "disabled" ]]; then
@@ -6521,17 +6583,8 @@ call_api_nonstreaming() {
 
     log "DEBUG: [API] call_api_nonstreaming: model=$_ap_model max_tok=$_max_tok_val msgs=$(jq 'length' <<< "$MESSAGES" 2>/dev/null || echo 0) thinking=$_ap_tb"
 
-    local show_thoughts="${BASHAGT_SHOW_THINKING:-status}"
-    local _start_ts _elapsed=0 _icon _spinner_now
-    _start_ts=$(_timestamp_ms)
-    _icon=$(ui_spinner)
-
-    # Resolve stream emit fd (bypass for daemon/hotkey FIFO)
-    local _stm_fd=${_BYPASS_FD:-1}
-
-    # ── status_begin (same UI as SSE path) ──
-    status_begin "$(_build_status "$_icon" "Thinking..." 0 0 0)"
-    _stream_kv status_begin icon "$_icon" label "Thinking..." elapsed_str "0s" >&$_stm_fd
+    _spin_tick
+    status_update "$(_build_status "$_SPIN_FRAME" "Thinking..." 0 0 0)"
 
     # ── Background: http_post (blocking) → response file ──
     local _out_file="$tmp_dir/response.json"
@@ -6706,6 +6759,27 @@ format_tool_result() {
 # Body safety: --body values are ALWAYS written to temp file and passed via
 # -d @file (not -d "$var") to prevent ARG_MAX explosion on large payloads.
 
+# ── http_retry <max> <base_ms> <max_ms> <func> [args...] ──
+# Exponential backoff + full jitter. Retries on codes 1 (connect timeout)
+# and 4 (DNS/connect refused). Does NOT retry on 3 (HTTP error) or 5 (TLS).
+http_retry() {
+    local _max="$1" _base_ms="$2" _max_ms="$3" _retry=0 _delay _rc
+    shift 3
+    while true; do
+        "$@" ; _rc=$?
+        case "$_rc" in
+            1|4)  # connect timeout / DNS — retryable
+                _retry=$((_retry + 1))
+                (( _retry > _max )) && return $_rc
+                _delay=$(( (_base_ms * (1 << (_retry - 1))) < _max_ms ? (_base_ms * (1 << (_retry - 1))) : _max_ms ))
+                _delay=$(( RANDOM % (_delay + 1) ))
+                _spin_sleep "$(awk "BEGIN {printf \"%.3f\", $_delay / 1000}")"
+                ;;
+            *) return $_rc ;;
+        esac
+    done
+}
+
 # ── Internal: map curl exit code + HTTP status to bashagt exit code ──
 _http_map_exit() {
     local _curl_rc="$1" _http_status="${2:-0}" _got_data="${3:-1}"
@@ -6861,6 +6935,7 @@ http_sse_connect() {
             --max-time)       _mt="$2"; shift 2 ;;
             --auth-header)    _auth_hdr="$2"; shift 2 ;;
             --auth-value)     _auth_val="$2"; shift 2 ;;
+            --spin-callback)  _sse_spin_cb="$2"; shift 2 ;;
             --err-file)       _err_file="$2"; shift 2 ;;
             *) shift ;;
         esac
@@ -6910,6 +6985,7 @@ http_sse_connect() {
         while kill -0 $_curl_pid 2>/dev/null; do
             _interrupted && { kill "$_curl_pid" 2>/dev/null || true; break; }
             _poll_esc || { kill "$_curl_pid" 2>/dev/null || true; break; }
+            [[ -n "${_sse_spin_cb:-}" ]] && { $_sse_spin_cb || true; }
 
             # Read one SSE line from FIFO (50ms timeout; OS pipe buffer prevents data loss)
             if IFS= read -r -t 0.05 -u $_sse_fd _line 2>/dev/null; then
@@ -8438,6 +8514,20 @@ ${raw}
     _FMT_LINEBUF=""
     _FMT_OUTFD="$_fd"
     _FMT_PREFIX="${prefix:-}"
+    _FMT_SPIN_TICK_CNT=0
+
+    # ── Spinner tick for SSE polling phase (keeps timer alive during format HTTP) ──
+    _fmt_spin_tick() {
+        [[ ${_FMT_START_TS:-0} -eq 0 ]] && return 0
+        [[ -z "${_FMT_DONE_LABEL:-}" ]] && return 0
+        (( _FMT_SPIN_TICK_CNT++ % 2 != 0 )) && return 0
+        local _now; _now=$(_timestamp_ms)
+        local _e=$(( _now - _FMT_START_TS ))
+        (( _e < 0 )) && _e=0
+        _spin_tick
+        _ui_time $_e
+        _stream_kv status_update icon "$_SPIN_FRAME" label "Thinking..." elapsed_str "$_UI_TIME" >&8
+    }
 
     # ── SSE streaming ──
     local _callback _av_header=()
@@ -8450,6 +8540,7 @@ ${raw}
 
     http_sse_connect "$_sa_url" "$_callback" \
         --connect-timeout "${BASHAGT_CONNECT_TIMEOUT:-10}" --max-time 120 \
+        --spin-callback _fmt_spin_tick \
         "${_av_header[@]}" \
         --header "content-type: application/json" \
         --auth-header "$_sa_auth_h" --auth-value "${_sa_auth_px}${_sa_key}" \
@@ -8625,7 +8716,8 @@ task_cancel() { local f="$TASK_DIR/${1}.json"; [[ -f "$f" ]] || return; rm -f "$
 # Engram memory network: N engrams × M slots = total capacity
 # Write: free-slot-first. Sleep phase at write_rate ≥ 85%.
 
-MEM_NET_DIR=".bashagt/mem_net"
+# _set_project_paths() in main() sets the authoritative value.
+MEM_NET_DIR=""
 MEMORY_POOL=""          # JSON array of all summaries (cached, 30s TTL)
 MEMORY_CACHE_TS=0
 MEM_SLOT_TABLE=""       # path to slot_table.json
@@ -9506,7 +9598,8 @@ _mem_enter_sleep_phase() {
 # ============================================================================
 
 TODOS='[]'
-TODO_FILE=".bashagt/todo.json"
+# _set_project_paths() in main() sets the authoritative value.
+TODO_FILE=""
 _LAST_TODO_ID=""
 
 # Load TODO list from disk
@@ -10719,11 +10812,7 @@ BASHAGT_TRACE_TOOL=""
 
 # ── _trace_hash — compute SHA256 of content, returns hash ──
 _trace_hash() {
-    local _content="$1"
-    printf '%s' "$_content" | sha256sum 2>/dev/null | awk '{print $1}' \
-        || printf '%s' "$_content" | shasum -a 256 2>/dev/null | awk '{print $1}' \
-        || printf '%s' "$_content" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}' \
-        || cksum <<< "$_content" 2>/dev/null | awk '{printf "%s%s", $1, $2}'
+    printf '%s' "$1" | _cc_hash
 }
 
 # ── _trace_object_path — get filesystem path for a content hash ──
@@ -11574,23 +11663,13 @@ tool_edit_file() {
     local content
     content=$(<"$path")
 
-    # Check existence (literal substring match)
-    if [[ "$content" != *"$old_str"* ]]; then
-        printf 'Error: old_string not found in file\n'
+    # Check existence and uniqueness in one regex: "$old_str".*"$old_str"
+    # matches only when old_str appears at least twice. Fast (~15ms for 600KB)
+    # unlike ${content#*"$old_str"} parameter expansion (150-330s on large files).
+    if [[ "$content" =~ "$old_str"[[:space:][:print:]]*"$old_str" ]]; then
+        printf 'Error: old_string appears multiple times in the file; must be unique\n'
         return 1
-    fi
-
-    # Check for multiple occurrences in original content BEFORE replacement.
-    # Uses bash regex (=~) instead of ${content#*"$old_str"} — the parameter
-    # expansion path is O(n??) on large strings (150-330s for 600KB file),
-    # while regex completes in ~15ms.  Quoted "$old_str" = literal match.
-    if [[ "$content" =~ "$old_str"([[:space:]]|[[:print:]])* ]]; then
-        local _first_rest="${BASH_REMATCH[1]}"
-        if [[ "$_first_rest" == *"$old_str"* ]]; then
-            printf 'Error: old_string appears multiple times in the file; must be unique\n'
-            return 1
-        fi
-    else
+    elif [[ "$content" != *"$old_str"* ]]; then
         printf 'Error: old_string not found in file\n'
         return 1
     fi
@@ -12578,8 +12657,7 @@ _slash_plan() {
     fi
 }
 _slash_clear() {
-    MESSAGES='[]'
-    _cc_invalidate msgs
+    msg_replace_all '[]'
     save_history
     _stream_emit "text" "$(jq -nc --arg c '  History cleared.' '{content: $c}')"
 }
@@ -12974,12 +13052,48 @@ _RULES_REMINDER_TEXT='1.  Confirm explicit edit request before modifying. Use re
 14. Be concise. Start with the answer — skip greetings, filler, and sign-offs.
 15. If a tool fails twice, report the error. Do not retry blindly.'
 
+# ── Deferred data flush helpers ──
+# Called by run_turn to consolidate scattered _DEFERRED_* reads into two sites.
+
+# Flush deferred tool feedback + step banner (set by tool_make_todos / tool_task_update).
+# Called immediately after dispatch_tool returns — before any branching.
+_turn_flush_feedback() {
+    if [[ -n "${_DEFERRED_FEEDBACK:-}" ]]; then
+        _stream_emit "text" "$(jq -nc --arg c "$_DEFERRED_FEEDBACK" '{content: $c}')"
+        _DEFERRED_FEEDBACK=""
+    fi
+    if [[ -n "${_STEP_BANNER:-}" ]]; then
+        _stream_emit "text" "$(jq -nc --arg c "$_STEP_BANNER" '{content: $c}')"
+        _STEP_BANNER=""
+    fi
+}
+
+# Flush deferred assistant content, plan messages, and plan stop.
+# Must be called AFTER tool_results are added (preserving tool_use/tool_result pairing).
+# Returns 1 if _PLAN_STOP was set (caller should end the turn).
+_turn_flush_assistant() {
+    if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
+        msg_add_assistant "$_DEFERRED_CONTENT_JSON"
+        _DEFERRED_CONTENT_JSON=""
+    fi
+    if [[ -n "${_PLAN_DEFERRED_MSG:-}" ]]; then
+        msg_add_user_text "$_PLAN_DEFERRED_MSG"
+        _PLAN_DEFERRED_MSG=""
+    fi
+    if (( ${_PLAN_STOP:-0} )); then
+        _PLAN_STOP=0
+        return 1
+    fi
+    return 0
+}
+
 _rules_reminder_inject() {
     _HOOK_CONTEXT_BUFFER+=$'\n\n'"--- RULES REMINDER ---"$'\n'"$_RULES_REMINDER_TEXT"
 }
 
-run_turn() {
-    local user_input="$1" called_task=0
+# ── _turn_init — per-turn state reset + input processing ──
+_turn_init() {
+    local user_input="$1"
     log "DEBUG: TURN_BEGIN input_size=${#user_input} msgs=$(jq 'length' <<< "$MESSAGES" 2>/dev/null)"
 
     # Reset per-turn state
@@ -12991,18 +13105,16 @@ run_turn() {
     TURN_PREV_STOP=""
     EFFECTIVE_MAX_TOKENS=""
     TURN_COUNTER=$((TURN_COUNTER + 1))
-    _HOOK_CONTEXT_BUFFER=""  # ephemeral hook injection buffer (cleared each turn)
-    _DEFERRED_FEEDBACK=""   # clear deferred tool feedback each turn
-    _STEP_BANNER=""         # clear deferred step banner each turn
+    _HOOK_CONTEXT_BUFFER=""
+    _DEFERRED_FEEDBACK=""
+    _STEP_BANNER=""
     _rules_reminder_inject
-    # Ensure clean tree state at turn start (finalize any stale tree from prior turn).
-    # Step-based UI: no cleanup needed — steps accumulate, each turn starts fresh
 
-    # Trim whitespace for reliable command matching
-    local trimmed; trimmed=$(printf '%s' "$user_input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # Trim whitespace
+    local _trimmed; _trimmed=$(printf '%s' "$user_input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
     # ── Plan confirmation marker (daemon gateway injects this) ──
-    if [[ "$trimmed" == __PLAN_APPROVED__* ]]; then
+    if [[ "$_trimmed" == __PLAN_APPROVED__* ]]; then
         local _plan_file="${BASHAGT_PROJECT_DIR:-$PWD}/.bashagt/plan.md"
         if [[ -f "$_plan_file" ]]; then
             _stream_emit "text" "$(jq -nc --arg c '  Plan approved. Verify: .bashagt/plan.md' '{content: $c}')"
@@ -13016,17 +13128,26 @@ Before creating TODO items, verify the plan:
 5. If issues found, suggest specific modifications now
 6. When satisfied, call: make_todos(plan_text) to extract steps and create TODO items"
         fi
-        return
+        return 1
     fi
 
-    # Dispatch slash commands via registry; /plan with arg sets
-    # _SLASH_FALLTHROUGH=1 to continue into the agent loop.
-    if _slash_dispatch "$trimmed"; then
-        [[ "${_SLASH_FALLTHROUGH:-0}" == "1" ]] || return
+    # Dispatch slash commands via registry
+    if _slash_dispatch "$_trimmed"; then
+        [[ "${_SLASH_FALLTHROUGH:-0}" == "1" ]] || return 1
     fi
-    # Add user message to history (use trimmed)
-    msg_add_user_text "$trimmed"
-    user_input="$trimmed"
+
+    # Add user message to history
+    msg_add_user_text "$_trimmed"
+    # Return processed input via global (same-shell contract)
+    _TURN_INPUT="$_trimmed"
+    return 0
+}
+
+run_turn() {
+    local user_input="$1" called_task=0
+
+    _turn_init "$user_input" || return
+    user_input="${_TURN_INPUT:-$user_input}"
 
     # ── pre_turn hook — situational context injection ──
     local _hook_ctx _hook_results _hook_item
@@ -13038,7 +13159,7 @@ Before creating TODO items, verify the plan:
         --argjson turn "${TURN_COUNTER:-0}" \
         --argjson streak "${NON_PRODUCTIVE_STREAK:-0}" \
         --argjson active_todos "$(_count_active_todos)" \
-        --arg goal "$(echo "$trimmed" | head -1)" \
+        --arg goal "$(echo "$user_input" | head -1)" \
         '{context:{used:$ctx_used,limit:$ctx_limit,pct:$ctx_pct},turn:{current:$turn,non_productive_streak:$streak},todos:{active:$active_todos},goal:$goal}')
     _hook_results=$(_hook_fire "pre_turn" "$_hook_ctx")
     if [[ "$_hook_results" != "[]" && -n "$_hook_results" ]]; then
@@ -13210,10 +13331,7 @@ Before creating TODO items, verify the plan:
                             _stream_emit "warning" "$(jq -nc --arg c "$_tkw_plain" '{content: $c}')"
                             accumulate_turn_tokens
                             TURN_PREV_STOP=""
-                            if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
-                                msg_add_assistant "$_DEFERRED_CONTENT_JSON"
-                                _DEFERRED_CONTENT_JSON=""
-                            fi
+                            _turn_flush_assistant
                             msg_add_user_text "Your last response contained only internal reasoning with no visible text or tool calls. Please produce visible output — either text or tool calls. Do not end_turn with only thinking."
                             continue
                         fi
@@ -13238,10 +13356,7 @@ Before creating TODO items, verify the plan:
                     "$(ui_label '──' gray)")
                 _stream_emit "info" "$(jq -nc --arg c "$_ts_msg" '{content: $c}')"
                 # Add assistant message now (end_turn: no tools to dispatch)
-                if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
-                    msg_add_assistant "$_DEFERRED_CONTENT_JSON"
-                    _DEFERRED_CONTENT_JSON=""
-                fi
+                _turn_flush_assistant
                 log "DEBUG: TURN_END  stop=end_turn rounds=$_round tok_in=$TURN_INPUT_TOKENS tok_out=$TURN_OUTPUT_TOKENS"
                 save_history
                 return
@@ -13372,17 +13487,7 @@ Before creating TODO items, verify the plan:
                         esac
                     fi
 
-                    # Emit deferred feedback from tool execution (e.g. _plan_auto_todo)
-                    if [[ -n "${_DEFERRED_FEEDBACK:-}" ]]; then
-                        _stream_emit "text" "$(jq -nc --arg c "$_DEFERRED_FEEDBACK" '{content: $c}')"
-                        _DEFERRED_FEEDBACK=""
-                    fi
-
-                    # Emit deferred step banner from tool_task_update
-                    if [[ -n "${_STEP_BANNER:-}" ]]; then
-                        _stream_emit "text" "$(jq -nc --arg c "$_STEP_BANNER" '{content: $c}')"
-                        _STEP_BANNER=""
-                    fi
+                    _turn_flush_feedback
 
                     # Update non-productive streak for post_response hook
                     if (( ! _safe_skip )); then
@@ -13446,10 +13551,7 @@ Before creating TODO items, verify the plan:
 
                 if [[ "${_SAFE_DENIED:-0}" == "1" ]]; then
                     # Add deferred assistant message + denial tool_results to history
-                    if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
-                        msg_add_assistant "$_DEFERRED_CONTENT_JSON"
-                        _DEFERRED_CONTENT_JSON=""
-                    fi
+                    _turn_flush_assistant
                     msg_add_tool_results "$results_json"
                     accumulate_turn_tokens
                     local _ts_msg; _ts_msg=$(printf '%s %s │ %s %s' \
@@ -13482,26 +13584,11 @@ Before creating TODO items, verify the plan:
                     _stream_emit "tree" "$(jq -nc --argjson entries "$_entries_json" '{entries: $entries}')"
                 fi
 
-                # Add assistant message to history BEFORE tool results —
-                # API requires assistant(tool_use) → user(tool_result) pairing order.
-                # Tools already executed with full content, truncation happens here.
-                if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
-                    msg_add_assistant "$_DEFERRED_CONTENT_JSON"
-                    _DEFERRED_CONTENT_JSON=""
-                fi
-
-                # Add tool results to history
-                msg_add_tool_results "$results_json"
-                # Flush deferred plan-confirmation message (must be AFTER
-                # tool_result to preserve tool_use/tool_result pairing order).
-                if [[ -n "${_PLAN_DEFERRED_MSG:-}" ]]; then
-                    msg_add_user_text "$_PLAN_DEFERRED_MSG"
-                    _PLAN_DEFERRED_MSG=""
-                fi
-                # Plan rejected/cancelled → end turn, return to REPL
-                if (( ${_PLAN_STOP:-0} )); then
-                    _PLAN_STOP=0
-                    # Emit turn stats (same as end_turn case)
+                # Add assistant message BEFORE tool results, then flush plan messages.
+                # _turn_flush_assistant handles _DEFERRED_CONTENT_JSON + _PLAN_DEFERRED_MSG + _PLAN_STOP.
+                _turn_flush_assistant || {
+                    # Plan rejected/cancelled → end turn, return to REPL
+                    msg_add_tool_results "$results_json"
                     turn_end=$(_timestamp_ms)
                     if [[ "$turn_start" != "0" ]] && [[ "$turn_end" != "0" ]]; then
                         elapsed_ms=$(( turn_end - turn_start ))
@@ -13519,7 +13606,8 @@ Before creating TODO items, verify the plan:
                     _log_flush
                     save_history
                     return 0
-                fi
+                }
+                msg_add_tool_results "$results_json"
                 accumulate_turn_tokens
                 TURN_PREV_STOP="tool_use"
                 true  # placeholder — consecutive tool rounds removed
@@ -13567,10 +13655,7 @@ Selected: ${_choice:-cancelled}"
             max_tokens)
                 accumulate_turn_tokens
                 TURN_PREV_STOP="max_tokens"
-                if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
-                    msg_add_assistant "$_DEFERRED_CONTENT_JSON"
-                    _DEFERRED_CONTENT_JSON=""
-                fi
+                _turn_flush_assistant
                 if ! handle_max_tokens; then
                     break  # stuck loop or budget exhausted
                 fi
@@ -13580,10 +13665,7 @@ Selected: ${_choice:-cancelled}"
                 log "Unexpected stop_reason: ${STOP_REASON:-empty}, treating as end_turn"
                 log "DEBUG: TURN_END  stop=unexpected rounds=$_round tok_in=$TURN_INPUT_TOKENS tok_out=$TURN_OUTPUT_TOKENS"
                 accumulate_turn_tokens
-                if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
-                    msg_add_assistant "$_DEFERRED_CONTENT_JSON"
-                    _DEFERRED_CONTENT_JSON=""
-                fi
+                _turn_flush_assistant
                 _log_flush
                 save_history
                 return

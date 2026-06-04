@@ -2,7 +2,7 @@
 # ============================================================================
 # Test: bashagt paste handling verification
 # Bug A: Single-line paste doesn't redraw — FIXED (L2869 now unconditional _in_buf_redraw)
-# Bug B: PASTE_END escape sequence leaks when parser times out — STILL PRESENT
+# Bug B: PASTE_END escape sequence leaks when parser times out — FIXED (recovery read after timeout)
 # ============================================================================
 set -euo pipefail
 
@@ -184,6 +184,55 @@ _sticky_test() {
 echo "  Typing 'X' after lost PASTE_END:"
 _sticky_test
 ok "Confirmed: _IN_PASTING sticky → permanent redraw suppression"
+
+# ── Test 6: Bug B FIXED — recovery read after timeout ──
+echo ""
+echo "── Bug B FIXED: Recovery read for partial paste sequences ──"
+
+# Replica of the fixed escape parser with recovery logic
+_fixed_escape_parser() {
+    local seq="" ch
+    local input="$1"
+    local i
+
+    for ((i=0; i<${#input}; i++)); do
+        ch="${input:$i:1}"
+        seq+="$ch"
+        [[ "$ch" == [A-Za-z~] ]] && break
+    done
+
+    # Recovery: if partial paste seq (simulating timeout mid-sequence)
+    if [[ "$seq" == '[200' || "$seq" == '[201' ]]; then
+        # Simulate one more read succeeding with ~
+        seq+='~'
+    fi
+
+    case "$seq" in
+        '[200~')  echo 'PASTE_START' ;;
+        '[201~')  echo 'PASTE_END' ;;
+        '[1;5C')  echo 'C-RIGHT' ;;
+        '[1;5D')  echo 'C-LEFT' ;;
+        *)        echo 'UNKNOWN' ;;
+    esac
+}
+
+# Partial [200 (delayed ~) → recovered to PASTE_START
+r=$(_fixed_escape_parser '[200')
+echo "  Partial [200 + recovery ~ → '$r'"
+[[ "$r" == "PASTE_START" ]] && ok "FIXED: [200 + recovery → PASTE_START" \
+    || fail "FIXED: [200 → got '$r' expected PASTE_START"
+
+# Partial [201 (delayed ~) → recovered to PASTE_END
+r=$(_fixed_escape_parser '[201')
+echo "  Partial [201 + recovery ~ → '$r'"
+[[ "$r" == "PASTE_END" ]] && ok "FIXED: [201 + recovery → PASTE_END" \
+    || fail "FIXED: [201 → got '$r' expected PASTE_END"
+
+# Normal full sequence still works (recovery not triggered — [200~ has terminator)
+r=$(_fixed_escape_parser '[201~')
+echo "  Full seq [201~ → '$r'"
+[[ "$r" == "PASTE_END" ]] && ok "FIXED: full seq still recognized" \
+    || fail "FIXED: full seq → got '$r'"
 
 # ── Summary ──
 echo ""

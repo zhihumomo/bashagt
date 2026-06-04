@@ -14,8 +14,11 @@ _fail() { FAIL=$((FAIL+1)); red "$1" "$2" "${3:-N/A}"; }
 
 [[ -f "$BASHAGT" ]] || { echo "ERROR: bashagt not found at $BASHAGT"; exit 1; }
 
-# Extract history functions (stable line range: _in_hist_load → _input_readline)
-sed -n '4720,4882p' "$BASHAGT" > /tmp/bashagt_hist_funcs.sh
+# Extract history functions dynamically (_in_hist_load → _input_readline)
+_HIST_START=$(grep -n '^_in_hist_load()' "$BASHAGT" | head -1 | cut -d: -f1)
+_HIST_END=$(grep -n '^_input_readline()' "$BASHAGT" | head -1 | cut -d: -f1)
+_HIST_END=$((_HIST_END - 1))
+sed -n "${_HIST_START},${_HIST_END}p" "$BASHAGT" > /tmp/bashagt_hist_funcs.sh
 
 echo "============================================"
 echo " Input History Unit Tests"

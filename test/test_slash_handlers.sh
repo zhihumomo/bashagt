@@ -43,6 +43,8 @@ _stream_reset() { _STREAM_OUT=""; }
 _stream_has() { grep -qF "$1" <<< "$_STREAM_OUT" 2>/dev/null; }
 
 _cc_invalidate() { return 0; }
+msg_replace_all() { MESSAGES="$1"; }
+msg_count() { jq 'length' <<< "$MESSAGES" 2>/dev/null || echo 0; }
 save_history() { _SAVE_CALLED=1; }
 load_history() { _LOAD_CALLED=1; }
 compress_context() { _COMPRESS_CALLED=1; }
