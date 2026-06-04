@@ -2,6 +2,7 @@
 # bashagt - Pure-bash AI assistant kernel
 set -euo pipefail -E
 shopt -s lastpipe 2>/dev/null || true
+trap '' PIPE  # silence SIGPIPE: builtins get EPIPE instead of killing shell
 
 # Pre-check: bash 4.0+ required (declare -A, pipefail, set -E, readarray)
 if ((BASH_VERSINFO[0] < 4)); then
@@ -4598,7 +4599,8 @@ _in_dispatch() {
                 # Clear notification then reposition cursor:
                 # \r in the clear leaves cursor at col 0,
                 # _in_buf_reposition restores it to the correct column.
-                printf '\033[1A\033[1B\r\033[K\033[1A'
+                # /dev/tty: bypass stdout (may be broken FIFO during turn)
+                printf '\033[1A\033[1B\r\033[K\033[1A' >/dev/tty
                 _in_buf_reposition
             fi
             ;;
@@ -8362,14 +8364,15 @@ _fmt_postprocess_var() {
 # JSON unescape for SSE text extraction.
 # Handles \\ vs \n ordering via SOH placeholder to avoid corrupting \\n sequences.
 _json_unescape() {
-    local _soh=$'\x01' _raw="$1" _outvar="$2"
-    _raw="${_raw//$'\\\\'/$_soh}"       # \\ → SOH (protect from \n replacement)
-    _raw="${_raw//'\r\n'/$'\n'}"         # CRLF → LF
-    _raw="${_raw//'\r'/$'\n'}"           # CR → LF
-    _raw="${_raw//'\n'/$'\n'}"           # LF → LF
-    _raw="${_raw//'\t'/$'\t'}"           # TAB
-    _raw="${_raw//$'\\\"'/'"'}"          # \" → "
-    _raw="${_raw//$_soh/$'\\'}"          # SOH → \
+    local _soh=$'\x01' _raw="$1" _outvar="$2" _bs
+    printf -v _bs '\\'                     # single backslash via printf (avoids \} parse risk)
+    _raw="${_raw//$'\\\\'/$_soh}"          # \\ → SOH (protect from \n replacement)
+    _raw="${_raw//'\r\n'/$'\n'}"           # CRLF → LF
+    _raw="${_raw//'\r'/$'\n'}"             # CR → LF
+    _raw="${_raw//'\n'/$'\n'}"             # LF → LF
+    _raw="${_raw//'\t'/$'\t'}"             # TAB
+    _raw="${_raw//$'\\\"'/'"'}"            # \" → "
+    _raw="${_raw//$_soh/$_bs}"             # SOH → \ (variable avoids \} parse error)
     printf -v "$_outvar" '%s' "$_raw"
 }
 
@@ -13468,7 +13471,7 @@ run_turn() {
                             agent|web_search|agent_batch|make_todos|undo|request) ;;
                             *) _stream_emit "tool_start" "$(jq -nc \
                                    --arg n "$tool_name" --arg id "$tool_id" --arg d "${_tsub_label:-}" \
-                                   '{name: $n, id: $id, desc: $d}')" ;;
+                                   '{name: $n, id: $id, desc: $d}')" || { local _rc=$?; log "DEBUG: [PIPE] tool_start emit rc=$_rc (FIFO broken?)"; true; } ;;
                         esac
                         _tool_out_file=$(_mktemp_file /tmp/bashagt_tool.XXXXXX 2>/dev/null)
                         if [[ -n "$_tool_out_file" && -f "$_tool_out_file" ]]; then
@@ -13514,7 +13517,7 @@ run_turn() {
                             agent|web_search|agent_batch|make_todos|undo|request) ;;
                             *) _stream_emit "tool_end" "$(jq -nc \
                                    --arg n "$tool_name" --arg e "$(ui_time $_ts_elapsed)" --argjson err "$_terr" \
-                                   '{name: $n, elapsed_str: $e, error: $err}')" ;;
+                                   '{name: $n, elapsed_str: $e, error: $err}')" || { local _rc=$?; log "DEBUG: [PIPE] tool_end emit rc=$_rc (FIFO broken?)"; true; } ;;
                         esac
                     fi
 
@@ -13953,7 +13956,8 @@ _stream_wrap_turn() {
     log "DEBUG: [FIFO] teardown rc=$_exec_rc fd1=$( [[ -e /proc/self/fd/1 ]] && echo ok || echo MISSING ) fd8=$( [[ -e /proc/self/fd/8 ]] && echo closed || echo STILL_OPEN )"
     (( _was_errexit )) && set -e
     if (( _exec_rc != 0 )); then
-        exec 1>&2
+        log "DEBUG: [FIFO] fd recovery: exec 1>&9 failed (rc=$_exec_rc), trying 1>&2"
+        exec 1>&2 2>/dev/null || { log "DEBUG: [FIFO] fd recovery: 1>&2 also failed, trying /dev/tty"; exec 1>/dev/tty 2>/dev/null || { log "DEBUG: [FIFO] fd recovery: ALL fallbacks exhausted"; true; }; }
     fi
 
     # Wait for renderer to finish consuming
