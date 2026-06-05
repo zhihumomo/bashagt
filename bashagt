@@ -5208,12 +5208,7 @@ load_config() {
 }
 
 # Load BASHAGT.md project context
-# Throttled: file stat only every _LOAD_MD_TTL turns (file rarely changes mid-session)
-_LOAD_MD_TURN=0
-_LOAD_MD_TTL=5
-load_bashagt_md() {
-    (( _LOAD_MD_TURN++ < _LOAD_MD_TTL )) && return 0
-    _LOAD_MD_TURN=0
+	load_bashagt_md() {
     local _f=".bashagt/BASHAGT.md" _cur
     if [[ -f "$_f" ]]; then
         _cur=$(_file_mtime "$_f")
@@ -6173,12 +6168,7 @@ _pe_cache_init() {
 
 # Check skill directories for mtime changes; reload and invalidate cache if stale.
 # Called by _pe_assemble_system() each turn before building the skill list.
-# Throttled: directory stat only every _RELOAD_SKILLS_TTL turns
-_RELOAD_SKILLS_TURN=0
-_RELOAD_SKILLS_TTL=5
-_reload_skills_if_stale() {
-    (( _RELOAD_SKILLS_TURN++ < _RELOAD_SKILLS_TTL )) && return 0
-    _RELOAD_SKILLS_TURN=0
+	_reload_skills_if_stale() {
     local _cur=0 _dir
     for _dir in "$HOME/.bashagt/skills/" .bashagt/skills/; do
         [[ -d "$_dir" ]] && { local _m; _m=$(_file_mtime "$_dir"); (( _m > _cur )) && _cur=$_m; }
