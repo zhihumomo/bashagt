@@ -1207,7 +1207,6 @@ _stream_render() {
             local _content; _content=$(jq -r '.content // ""' <<< "$_line" 2>/dev/null)
             printf '  %s%s%s\n' "$GRAY" "$_content" "$RESET" ;;
         status_begin|status_update|status_done)
-            _tm "renderer_${_type}_received"
             # Refresh TERM_WIDTH on each status_begin (persistent renderer spans many turns)
             [[ "$_type" == "status_begin" ]] && TERM_WIDTH=$(detect_term_width)
             local _fields _icon _label _ela _itok _otok _desc _itok_fmt _otok_fmt _k
@@ -1243,7 +1242,7 @@ _stream_render() {
                             _spin_tick 2>/dev/null || true
                             _ui_time $_r_elapsed 2>/dev/null || true
                             _r_st="  ${_SPIN_FRAME:-●} ${_R_SPIN_LABEL} (${_UI_TIME:-0s})"
-                            printf '\r%s\033[K' "$_r_st" >/dev/tty 2>/dev/null || break
+                            printf '\r%s\033[K' "$_r_st" 2>/dev/null >/dev/tty || break
                             sleep 0.1
                         done
                     ) &
@@ -1265,7 +1264,7 @@ _stream_render() {
                         fi
                         _st_line+=" · ${_d}"
                     fi
-                    printf '\r%s\033[K' "$_st_line" >/dev/tty
+                    printf '\r%s\033[K' "$_st_line" 2>/dev/null >/dev/tty || true
                 else
                     printf '\r  %s %s (%s)' "$_icon" "$_label" "$_ela"
                     [[ -n "$_desc" ]] && printf ' %s·%s %s' "$LIGHT_YELLOW" "$RESET" "$_desc"
@@ -14076,16 +14075,20 @@ print_banner() {
 _persistent_renderer_init() {
     _PERSISTENT_FIFO=$(_mktemp_u /tmp/bashagt_ps.XXXXXX)
     mkfifo "$_PERSISTENT_FIFO" 2>/dev/null || { log "ERROR: persistent FIFO creation failed"; return 1; }
-    # Fork renderer first (open-read blocks until a writer exists; we open writer next)
+    # Fork renderer first. The child's open-read blocks until a writer opens.
+    # We then open the write end (O_WRONLY, also blocks until reader exists).
+    # POSIX FIFO rendezvous: both open() calls resolve each other.
+    # After exec 7> returns, the renderer IS ready to receive data.
     (
         while IFS= read -r _line; do
             _stream_render "$_line" || true  # done frame does NOT exit renderer
         done < "$_PERSISTENT_FIFO"
     ) 1>&2 &
     _PERSISTENT_RENDERER_PID=$!
-    # Open persistent write end. Read-write (O_RDWR) never blocks on Linux,
-    # and satisfies the "at least one writer" requirement for the renderer's open-read.
-    exec 7<>"$_PERSISTENT_FIFO"
+    # Blocks until renderer opens read end (FIFO rendezvous).
+    # After open() succeeds, renderer still needs ~1 scheduler tick to enter read loop.
+    exec 7>"$_PERSISTENT_FIFO"
+    sleep 0.05  # let renderer settle into read() before any caller opens another write end
     log "DEBUG: [FIFO] persistent renderer pid=$_PERSISTENT_RENDERER_PID fifo=$_PERSISTENT_FIFO"
 }
 
@@ -14093,6 +14096,14 @@ _persistent_renderer_init() {
 _persistent_renderer_teardown() {
     [[ -n "${_PERSISTENT_RENDERER_PID:-}" ]] || return 0
     exec 7>&- 2>/dev/null || true       # close persistent write end
+    # Other fds (1, 8) may still point to the FIFO (e.g. inside _stream_wrap_turn
+    # during /exit). Send SIGTERM to guarantee renderer exit, SIGKILL as fallback.
+    kill "$_PERSISTENT_RENDERER_PID" 2>/dev/null || true
+    local _wait_n=0
+    while kill -0 "$_PERSISTENT_RENDERER_PID" 2>/dev/null && (( _wait_n < 20 )); do
+        sleep 0.05; _wait_n=$((_wait_n + 1))
+    done
+    kill -0 "$_PERSISTENT_RENDERER_PID" 2>/dev/null && kill -9 "$_PERSISTENT_RENDERER_PID" 2>/dev/null || true
     wait "$_PERSISTENT_RENDERER_PID" 2>/dev/null || true
     rm -f "$_PERSISTENT_FIFO" 2>/dev/null || true
     _PERSISTENT_RENDERER_PID=""
@@ -14258,7 +14269,7 @@ agent_loop() {
         # read -s interrupted by SIGINT restores its saved -echo state
         # AFTER the trap handler returns.  Prepend stty echo to the EXIT
         # trap that _input_cleanup just set.
-        trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; stty echo 2>/dev/null || true; _worker_shutdown; mcp_shutdown; save_history' EXIT
+        trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _persistent_renderer_teardown; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; stty echo 2>/dev/null || true; _worker_shutdown; mcp_shutdown; save_history' EXIT
         exit 0
     }
 
