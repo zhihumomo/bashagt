@@ -786,6 +786,75 @@ _colors_resolve() {
     BOLD=$'\033[1m'
     DIM=$'\033[2m'
     RESET=$'\033[0m'
+    # Rebuild BSRP with current mode's color table
+    _bsrp_assemble
+}
+
+# Assemble BSRP body by injecting the active mode's color table + examples.
+# Called by _colors_resolve() whenever dark/light mode changes.
+_bsrp_assemble() {
+    [[ -z "${BSRP_TEMPLATE:-}" ]] && return 0
+    local _table _examples
+    if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
+        _table='  kw  = \033[38;2;86;156;214m    #569CD6  blue    if/for/def/class/return
+  str = \033[38;2;206;145;120m   #CE9178  orange  "hello" '"'"'world'"'"'
+  cmt = \033[38;2;106;153;85m    #6A9955  green   # comment // comment
+  fn  = \033[38;2;220;220;170m   #DCDCAA  yellow  greet() grep echo
+  cls = \033[38;2;78;201;176m    #4EC9B0  teal    MyClass ValueError
+  var = \033[38;2;156;220;254m   #9CDCFE  lt-blue name $HOME ${VAR}
+  num = \033[38;2;181;206;168m   #B5CEA8  lt-grn  42 3.14 0xFF
+  dec = \033[38;2;255;215;0m     #FFD700  gold    @decorator
+  esc = \033[38;2;215;186;125m   #D7BA7D  brown   \n \t \\ (in strings)
+  rst = \033[0m                                   reset all'
+        _examples='Python example:
+<code>
+\033[38;2;86;156;214mdef\033[0m \033[38;2;220;220;170mgreet\033[0m(\033[38;2;156;220;254mname\033[0m):
+    \033[38;2;106;153;85m"""Say hello."""\033[0m
+    \033[38;2;86;156;214mreturn\033[0m \033[38;2;206;145;120mf"Hello, {\033[0m\033[38;2;156;220;254mname\033[0m\033[38;2;206;145;120m}!"\033[0m
+</code>
+
+Shell example:
+<code>
+\033[38;2;86;156;214mfor\033[0m \033[38;2;156;220;254mi\033[0m \033[38;2;86;156;214min\033[0m {\033[38;2;181;206;168m1\033[0m..\033[38;2;181;206;168m3\033[0m};
+\033[38;2;86;156;214mdo\033[0m
+    \033[38;2;220;220;170mecho\033[0m \033[38;2;206;145;120m"$i: \033[0m\033[38;2;156;220;254m$RANDOM\033[0m\033[38;2;206;145;120m"\033[0m
+    \033[38;2;220;220;170msleep\033[0m \033[38;2;181;206;168m1\033[0m
+\033[38;2;86;156;214mdone\033[0m
+</code>'
+    else
+        _table='  kw  = \033[38;2;0;0;255m       #0000FF  blue
+  str = \033[38;2;163;21;21m     #A31515  red
+  cmt = \033[38;2;0;128;0m       #008000  green
+  fn  = \033[38;2;121;94;38m     #795E26  brown
+  cls = \033[38;2;38;127;127m    #267F7F  teal
+  var = \033[38;2;0;16;128m      #001080  navy
+  num = \033[38;2;9;134;88m      #098658  green
+  dec = \033[38;2;128;128;0m     #808000  olive
+  esc = \033[38;2;128;80;0m      #805000  brown
+  rst = \033[0m'
+        _examples='Python example:
+<code>
+\033[38;2;0;0;255mdef\033[0m \033[38;2;121;94;38mgreet\033[0m(\033[38;2;0;16;128mname\033[0m):
+    \033[38;2;0;128;0m"""Say hello."""\033[0m
+    \033[38;2;0;0;255mreturn\033[0m \033[38;2;163;21;21mf"Hello, {\033[0m\033[38;2;0;16;128mname\033[0m\033[38;2;163;21;21m}!"\033[0m
+</code>
+
+Shell example:
+<code>
+\033[38;2;0;0;255mfor\033[0m \033[38;2;0;16;128mi\033[0m \033[38;2;0;0;255min\033[0m {\033[38;2;9;134;88m1\033[0m..\033[38;2;9;134;88m3\033[0m};
+\033[38;2;0;0;255mdo\033[0m
+    \033[38;2;121;94;38mecho\033[0m \033[38;2;163;21;21m"$i: \033[0m\033[38;2;0;16;128m$RANDOM\033[0m\033[38;2;163;21;21m"\033[0m
+    \033[38;2;121;94;38msleep\033[0m \033[38;2;9;134;88m1\033[0m
+\033[38;2;0;0;255mdone\033[0m
+</code>'
+    fi
+    local _section; printf -v _section '%s\n\n%s\n\n%s\n\n%s' \
+        'COLOR CONSTANTS (current mode):' \
+        "$_table" \
+        'HIGHLIGHTING PRIORITY (H2): comments > strings > keywords > class names > builtins > function calls > decorators > variables > numbers' \
+        "§CODE EXAMPLES:$_examples"
+    FORMAT_AGENT_BODY="${BSRP_TEMPLATE//__COLOR_SECTION__/$_section}"
+    AGENTS[format]="$FORMAT_AGENT_BODY"
 }
 
 # Initialize colors (may be re-called on dark_mode toggle)
@@ -8393,64 +8462,7 @@ names (kw, str, cmt, fn, cls, var, num, dec, esc, rst) for YOUR reference —
 these are NOT XML tags. NEVER output <kw>, <cmt>, <fn> or any similar tags.
 Only use the ANSI escape sequences (e.g. \033[38;2;86;156;214m).
 
-DARK MODE constants (VS Code Dark+):
-  kw  = \033[38;2;86;156;214m    #569CD6  blue    if/for/def/class/return
-  str = \033[38;2;206;145;120m   #CE9178  orange  "hello" 'world'
-  cmt = \033[38;2;106;153;85m    #6A9955  green   # comment // comment
-  fn  = \033[38;2;220;220;170m   #DCDCAA  yellow  greet() grep echo
-  cls = \033[38;2;78;201;176m    #4EC9B0  teal    MyClass ValueError
-  var = \033[38;2;156;220;254m   #9CDCFE  lt-blue name $HOME ${VAR}
-  num = \033[38;2;181;206;168m   #B5CEA8  lt-grn  42 3.14 0xFF
-  dec = \033[38;2;255;215;0m     #FFD700  gold    @decorator
-  esc = \033[38;2;215;186;125m   #D7BA7D  brown   \n \t \\ (in strings)
-  rst = \033[0m                                   reset all
-
-LIGHT MODE constants (VS Code Light+):
-  kw  = \033[38;2;0;0;255m       #0000FF  blue
-  str = \033[38;2;163;21;21m     #A31515  red
-  cmt = \033[38;2;0;128;0m       #008000  green
-  fn  = \033[38;2;121;94;38m     #795E26  brown
-  cls = \033[38;2;38;127;127m    #267F7F  teal
-  var = \033[38;2;0;16;128m      #001080  navy
-  num = \033[38;2;9;134;88m      #098658  green
-  dec = \033[38;2;128;128;0m     #808000  olive
-  esc = \033[38;2;128;80;0m      #805000  brown
-  rst = \033[0m
-
-HIGHLIGHTING PRIORITY (H2):
-  comments > strings > keywords > class names > builtins >
-  function calls > decorators > variables > numbers
-
-§CODE SIMPLE EXAMPLE — Python, DARK mode
-
-Input:
-  def greet(name):
-      """Say hello."""
-      return f"Hello, {name}!"
-
-Output (each token wrapped in raw ANSI escape codes — \033 is ESC byte):
-<code>
-\033[38;2;86;156;214mdef\033[0m \033[38;2;220;220;170mgreet\033[0m(\033[38;2;156;220;254mname\033[0m):
-    \033[38;2;106;153;85m"""Say hello."""\033[0m
-    \033[38;2;86;156;214mreturn\033[0m \033[38;2;206;145;120mf"Hello, {\033[0m\033[38;2;156;220;254mname\033[0m\033[38;2;206;145;120m}!"\033[0m
-</code>
-
-§CODE SHELL EXAMPLE — DARK mode:
-
-Input:
-  for i in {1..3}; do
-      echo "$i: $RANDOM"
-      sleep 1
-  done
-
-Output:
-<code>
-\033[38;2;86;156;214mfor\033[0m \033[38;2;156;220;254mi\033[0m \033[38;2;86;156;214min\033[0m {\033[38;2;181;206;168m1\033[0m..\033[38;2;181;206;168m3\033[0m};
-\033[38;2;86;156;214mdo\033[0m
-    \033[38;2;220;220;170mecho\033[0m \033[38;2;206;145;120m"$i: \033[0m\033[38;2;156;220;254m$RANDOM\033[0m\033[38;2;206;145;120m"\033[0m
-    \033[38;2;220;220;170msleep\033[0m \033[38;2;181;206;168m1\033[0m
-\033[38;2;86;156;214mdone\033[0m
-</code>
+__COLOR_SECTION__
 
 LANGUAGE-SPECIFIC CLASSIFICATIONS:
 
@@ -8494,8 +8506,9 @@ COLORING RULES:
 
 ━━━ COLOR TAG REFERENCE ━━━
 
-Semantic tags for text OUTSIDE <code> blocks. </> closes any open tag.
-The system converts tags to ANSI; tags inside <code> are ignored.
+Semantic tags for text OUTSIDE <code> blocks. Tags are converted to ANSI;
+tags inside <code> blocks are ignored. Each opening tag needs a matching
+closing tag (e.g. <ok>...</ok>).
 
   <b>text</>      Bold/emphasis      — section headers, step labels
   <dim>text</>    Dim/subdued        — secondary info, timestamps, metadata
@@ -8509,7 +8522,7 @@ The system converts tags to ANSI; tags inside <code> are ignored.
   <var>text</>    Variable           — $HOME, name, config_key
 
 TAG RULES:
-  T1. Every <tag> MUST have matching </>. No unclosed tags.
+  T1. Every <tag> MUST have matching </tag>. No unclosed tags.
   T2. Structural tags (<b>) MAY wrap highlight tags. Highlight tags MUST NOT
       nest inside other highlight tags.
   T3. Use tags SPARINGLY. Color loses impact when everything is colored.
@@ -8554,13 +8567,13 @@ Output:
 
 Input: "Changes: added auth.py, modified config.py, deleted old_parser.py"
 Output:
-  ┌────────────────────┬────────────────────────────┐
-  │ <b>Change</b>      │ <b>File</b>                │
-  ├────────────────────┼────────────────────────────┤
-  │ <ok>+ add</ok>     │ <path>auth.py</path>       │
-  │ <warn>~ mod</warn> │ <path>config.py</path>     │
-  │ <err>- del</err>   │ <path>old_parser.py</path> │
-  └────────────────────┴────────────────────────────┘
+  ┌──────────┬──────────────────┐
+  │ <b>Change</b>   │ <b>File</b>             │
+  ├──────────┼──────────────────┤
+  │ <ok>+ add</ok>    │ <path>auth.py</path>      │
+  │ <warn>~ mod</warn>    │ <path>config.py</path>    │
+  │ <err>- del</err>    │ <path>old_parser.py</path> │
+  └──────────┴──────────────────┘
 
 Input: "Setup: 1. Clone repo 2. pip install -r requirements.txt 3. Copy
        .env.example to .env 4. Run python3 main.py"
@@ -8585,6 +8598,8 @@ E8. Pre-existing ANSI: strip OUTSIDE <code>. INSIDE <code>: PRESERVE
     (these are agent-generated syntax highlights).
 
 AGEF
+BSRP_TEMPLATE="$FORMAT_AGENT_BODY"
+_bsrp_assemble  # fill __COLOR_SECTION__ with active mode
 FORMAT_AGENT_META='{"name":"format","description":"bashagt Standard Rendering Protocol engine","max_tokens":32768,"thinking_budget":0,"tools":[]}'
 
 # Convert BSRP semantic tags to ANSI. <code> blocks pass through unchanged.
@@ -8778,7 +8793,6 @@ format_text_stream() {
     _sa_auth_px=$(_prof_get_field auth_prefix)
     _sa_key=$(_prof_get_field api_key)
 
-    # ── Build system prompt ──
     local system_prompt="Your agent name: format
 Other running agents: none
 Current working directory: $(pwd)
@@ -13495,6 +13509,32 @@ _slash_safe() {
         _stream_emit "text" "$(jq -nc '{content: "  \033[36m◆ Safe mode OFF\033[0m — tools execute directly. Shift+Tab to toggle."}')"
     fi
 }
+_slash_dark() {
+    local _trimmed="$1" _args="${_trimmed#/dark }"
+    [[ "$_args" == "$_trimmed" ]] && _args=""
+
+    case "$_args" in
+        on|true|1)   BASHAGT_DARK_MODE="true" ;;
+        off|false|0) BASHAGT_DARK_MODE="false" ;;
+        "")
+            if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
+                BASHAGT_DARK_MODE="false"
+            else
+                BASHAGT_DARK_MODE="true"
+            fi
+            ;;
+        *)  _stream_emit "warning" "$(jq -nc '{content: "  Usage: /dark [on|off]"}')"; return ;;
+    esac
+
+    _colors_resolve
+
+    local _dim=$'\033[2m' _rst=$'\033[0m'
+    if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
+        _stream_emit "text" "$(jq -nc --arg d "$_dim" --arg r "$_rst" '{content: ($d + "◆ Dark mode ON" + $r)}')"
+    else
+        _stream_emit "text" "$(jq -nc --arg d "$_dim" --arg r "$_rst" '{content: ($d + "◆ Dark mode OFF (Light)" + $r)}')"
+    fi
+}
 _slash_help() {
     local _help_out
     printf -v _help_out '%s\n' \
@@ -13566,6 +13606,7 @@ _register_slash help       _slash_help
 _register_slash exit       _slash_exit
 _register_slash quit       _slash_exit
 _register_slash safe       _slash_safe
+_register_slash dark       _slash_dark
 
 # ── Behavioral rules reminder (every turn, ephemeral — not persisted to history) ──
 _RULES_REMINDER_TEXT='1.  Confirm explicit edit request before modifying. Use request() if uncertain.
@@ -14519,6 +14560,7 @@ _persistent_renderer_teardown() {
 #   _to_stderr=false → oneshot/pipe (renderer → original stdout, no INT trap, no \n)
 _stream_wrap_turn() {
     local _prompt="$1" _to_stderr="${2:-true}" _fifo _renderer_pid _persistent=0
+    _colors_resolve  # sync colors to current dark/light mode
     _tm "wrap_turn_start"
     log "DEBUG: STREAM_WRAP input_size=${#_prompt}"
 
