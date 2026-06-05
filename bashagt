@@ -751,6 +751,7 @@ STATUS_ACTIVE=0
 _BYPASS_FD=1  # stream emit bypass fd — set to 8 when FIFO is active
 _PERSISTENT_FIFO=""           # persistent renderer FIFO path (created once at init)
 _PERSISTENT_RENDERER_PID=""   # persistent renderer background PID
+_PERSISTENT_RESP_FIFO=""      # response FIFO: renderer writes "ok" on done → main syncs
 
 
 # ── Slash command registry ──
@@ -1115,9 +1116,7 @@ _ui_time() {
 # Leaf: Tokens — formatted "↑in ↓out" string (empty if both zero)
 ui_tokens() {
     local _in="${1:-0}" _out="${2:-0}"
-    if (( _in > 0 || _out > 0 )); then
-        printf '%s↑%s ↓%s%s' "$GRAY" "$(token_fmt "$_in")" "$(token_fmt "$_out")" "$RESET"
-    fi
+    printf '%s↑%s ↓%s%s' "$GRAY" "$(token_fmt "$_in")" "$(token_fmt "$_out")" "$RESET"
 }
 
 # Leaf: Label — styled text (style: bold, dim, green, red, cyan, yellow, gray, plain)
@@ -1194,7 +1193,7 @@ _stream_render() {
     esac
 
     case "$_type" in
-        done) return 1 ;;
+        done) printf 'ok\n' >&6 2>/dev/null || true; return 1 ;;
         text)
             local _content; _content=$(jq -r '.content // ""' <<< "$_line" 2>/dev/null)
             _content="  ${_content//$'\n'/$'\n'  }"
@@ -1289,6 +1288,7 @@ _stream_render() {
                 printf '\n'
             fi ;;
         tool_end)
+            log "DEBUG: [RENDER] tool_end _TOOL_NAME=[${_TOOL_NAME:-}] _TOOL_DESC=[${_TOOL_DESC:-}] frame_name=$(jq -r '.name // "?"' <<< "$_line" 2>/dev/null)"
             [[ -z "$_TOOL_NAME" ]] && return 0
             local _ela; _ela=$(jq -r '.elapsed_str // ""' <<< "$_line" 2>/dev/null)
             if _detect_termux; then
@@ -6819,7 +6819,7 @@ call_api_nonstreaming() {
     # ── Foreground: wait for API with Esc/Ctrl-C interrupt ──
     # Spinner animation is handled by async ticker (_spinner_ticker_start)
     while kill -0 $_api_pid 2>/dev/null; do
-        _spin_sleep 0.1 || { kill "$_api_pid" 2>/dev/null || true; break; }
+        _spin_sleep 0.1 || { _pkill_tree "$_api_pid" TERM 2>/dev/null || true; break; }
     done
     wait $_api_pid
     local _rc=$?
@@ -6844,10 +6844,23 @@ call_api_nonstreaming() {
             status_done "think-error ($(ui_time $_elapsed))"
             _ui_time $_elapsed
             _stream_kv status_done label "think-error" elapsed_str "$_UI_TIME" >&$_stm_fd
+        else
+            # Interrupted: must send status_done to stop renderer self-animating timer
+            _ui_time $_elapsed
+            _stream_kv status_done label "think-interrupted" elapsed_str "$_UI_TIME" >&$_stm_fd
         fi
 
+        # Try to salvage partial token counts from truncated response body.
+        # curl writes body to $_out_file as it arrives; grep can extract
+        # "input_tokens":N / "output_tokens":N even from broken JSON.
+        local _pt_in=0 _pt_out=0
+        if [[ -s "$_out_file" ]]; then
+            _pt_in=$(grep -oE '"input_tokens"[[:space:]]*:[[:space:]]*[0-9]+' "$_out_file" 2>/dev/null | head -1 | grep -oE '[0-9]+' || echo 0)
+            _pt_out=$(grep -oE '"output_tokens"[[:space:]]*:[[:space:]]*[0-9]+' "$_out_file" 2>/dev/null | head -1 | grep -oE '[0-9]+' || echo 0)
+        fi
+        TURN_INPUT_TOKENS="${_pt_in:-0}"
+        TURN_OUTPUT_TOKENS="${_pt_out:-0}"
         CONTENT_BLOCKS='[]'; STOP_REASON='end_turn'
-        TURN_INPUT_TOKENS=0; TURN_OUTPUT_TOKENS=0
         rm -rf "$tmp_dir"; return 3
     fi
 
@@ -7194,8 +7207,8 @@ http_sse_connect() {
 
         # Polling loop: keyboard + SSE FIFO
         while kill -0 $_curl_pid 2>/dev/null; do
-            _interrupted && { kill "$_curl_pid" 2>/dev/null || true; break; }
-            _poll_esc || { kill "$_curl_pid" 2>/dev/null || true; break; }
+            _interrupted && { _pkill_tree "$_curl_pid" TERM 2>/dev/null || true; break; }
+            _poll_esc || { _pkill_tree "$_curl_pid" TERM 2>/dev/null || true; break; }
             [[ -n "${_sse_spin_cb:-}" ]] && { $_sse_spin_cb || true; }
 
             # Read one SSE line from FIFO (50ms timeout; OS pipe buffer prevents data loss)
@@ -13466,8 +13479,8 @@ run_turn() {
                     "$(ui_time $(( $(_timestamp_ms) - turn_start )))" \
                     "$(ui_tokens $TURN_INPUT_ACCUM $TURN_OUTPUT_ACCUM)" \
                     "$(ui_label '──' gray)")
-                _stream_emit "info" "$(jq -nc --arg c "$_ts_msg" '{content: $c}')"
                 _stream_emit "warning" "$(jq -nc '{content: "Turn interrupted (Esc/Ctrl-C)"}')"
+                _stream_emit "info" "$(jq -nc --arg c "$_ts_msg" '{content: $c}')"
                 return 0
             fi
 
@@ -14111,11 +14124,24 @@ print_banner() {
 _persistent_renderer_init() {
     _PERSISTENT_FIFO=$(_mktemp_u /tmp/bashagt_ps.XXXXXX)
     mkfifo "$_PERSISTENT_FIFO" 2>/dev/null || { log "ERROR: persistent FIFO creation failed"; return 1; }
+    # Response FIFO: renderer writes "ok" after processing "done" so main can sync.
+    _PERSISTENT_RESP_FIFO=$(_mktemp_u /tmp/bashagt_rs.XXXXXX)
+    mkfifo "$_PERSISTENT_RESP_FIFO" 2>/dev/null || { log "ERROR: response FIFO creation failed"; return 1; }
+    # Open O_RDWR so both sides can open without blocking (FIFO rendezvous bypass).
+    exec 6<>"$_PERSISTENT_RESP_FIFO"
     # Fork renderer first. The child's open-read blocks until a writer opens.
     # We then open the write end (O_WRONLY, also blocks until reader exists).
     # POSIX FIFO rendezvous: both open() calls resolve each other.
     # After exec 7> returns, the renderer IS ready to receive data.
     (
+        # Kill timer child on ANY exit path (EOF, SIGTERM, SIGHUP).
+        # Without this the timer is orphaned → writes to /dev/tty forever.
+        _renderer_cleanup() {
+            [[ -n "${_R_SPIN_TIMER_PID:-}" ]] && kill "$_R_SPIN_TIMER_PID" 2>/dev/null || true
+            printf "\r\033[K" >/dev/tty 2>/dev/null || true
+        }
+        trap '_renderer_cleanup' EXIT
+        trap '_renderer_cleanup; exit 0' TERM HUP
         while IFS= read -r _line; do
             _stream_render "$_line" || true  # done frame does NOT exit renderer
         done < "$_PERSISTENT_FIFO"
@@ -14130,6 +14156,7 @@ _persistent_renderer_init() {
 
 # Called in EXIT trap. Closes persistent write end → renderer gets EOF → exits.
 _persistent_renderer_teardown() {
+    log "DEBUG: [FIFO] teardown start _PERSISTENT_RENDERER_PID=[${_PERSISTENT_RENDERER_PID:-}]"
     [[ -n "${_PERSISTENT_RENDERER_PID:-}" ]] || return 0
     exec 7>&- 2>/dev/null || true       # close persistent write end
     # Other fds (1, 8) may still point to the FIFO (e.g. inside _stream_wrap_turn
@@ -14142,8 +14169,11 @@ _persistent_renderer_teardown() {
     kill -0 "$_PERSISTENT_RENDERER_PID" 2>/dev/null && kill -9 "$_PERSISTENT_RENDERER_PID" 2>/dev/null || true
     wait "$_PERSISTENT_RENDERER_PID" 2>/dev/null || true
     rm -f "$_PERSISTENT_FIFO" 2>/dev/null || true
+    exec 6>&- 2>/dev/null || true              # close response FIFO fd
+    rm -f "$_PERSISTENT_RESP_FIFO" 2>/dev/null || true
     _PERSISTENT_RENDERER_PID=""
     _PERSISTENT_FIFO=""
+    _PERSISTENT_RESP_FIFO=""
     log "DEBUG: [FIFO] persistent renderer torn down"
 }
 
@@ -14187,8 +14217,13 @@ _stream_wrap_turn() {
         exec 8>&1
         _BYPASS_FD=8
     fi
-    # Emit spinner frame — renderer self-animates on status_begin
-    _stream_kv status_begin icon "$(ui_spinner)" label "Thinking..." elapsed_str "0s" >&8
+    # Emit spinner frame — renderer self-animates on status_begin.
+    # Skip for slash commands: they process locally without an API call.
+    # (If a slash command falls through to the agent loop, call_api_nonstreaming
+    #  will emit its own status_begin at the right time.)
+    if [[ "$_prompt" != /* ]]; then
+        _stream_kv status_begin icon "$(ui_spinner)" label "Thinking..." elapsed_str "0s" >&8
+    fi
     log "DEBUG: [FIFO] setup persistent=$_persistent fd8=$( [[ -e /proc/self/fd/8 ]] && echo ok || echo MISSING ) fd9=$( [[ -e /proc/self/fd/9 ]] && echo ok || echo MISSING ) fifo=$_fifo"
 
     # Interactive mode: replace INT trap with soft-interrupt for the API call
@@ -14211,8 +14246,13 @@ _stream_wrap_turn() {
         else trap - INT; fi
     fi
 
-    # Emit "done" LAST — renderer ignores it (||true), stays alive in persistent mode
+    # Emit "done" LAST — renderer writes "ok" to fd 6 after processing all frames.
     _stream_emit "done" "$(jq -nc '{elapsed_str: "", tokens_in: 0, tokens_out: 0}')" 2>/dev/null || true
+    if (( _persistent )); then
+        # Block until renderer drains FIFO (processes done → writes "ok" to fd 6).
+        # Prevents async renderer stderr output racing with REPL › prompt on stdout.
+        IFS= read -r -t 2 _renderer_ack <&6 2>/dev/null || true
+    fi
 
     # Restore stdout — close FIFO write ends (but fd 7 keeps persistent renderer alive)
     local _was_errexit=0; [[ -o errexit ]] && _was_errexit=1
