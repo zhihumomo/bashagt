@@ -155,7 +155,7 @@ ACTIVE_SKILLS=()
 # ════════════════ T15-T19: _pe_assemble_context ════════════════
 
 # T15: basic context includes CWD
-_result=$(_pe_assemble_context)
+_pe_assemble_context; _result="$_PE_DYN_MSG"
 echo "$_result" | jq -e '.content[0].text' >/dev/null 2>&1 && _green "T15: context has text" \
     || _red "T15: context text" "present" "absent"
 

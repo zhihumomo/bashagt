@@ -5184,6 +5184,13 @@ load_bashagt_md() {
 
 MESSAGES='[]'
 
+# ── Message segment cache (incremental assembly) ──
+MSG_COUNT=0
+MSG_BP=-1
+MSG_PREFIX_INNER=''           # messages[0..bp] inner elements (no outer [])
+MSG_TAIL_INNER=''             # messages[bp+1..] inner elements (no outer [])
+MSG_SEGMENTS_DIRTY=0
+
 save_history() {
     local _tmp; _tmp=$(_mktemp_file .bashagt/history.XXXXXX 2>/dev/null)
     if [[ -n "$_tmp" ]]; then
@@ -5197,37 +5204,39 @@ save_history() {
 load_history() {
     if [[ -f "$BASHAGT_HISTORY_FILE" ]]; then
         msg_replace_all "$(jq '[.[] | select(.content != [] and .content != "" and .content != null)]' "$BASHAGT_HISTORY_FILE" 2>/dev/null || echo '[]')"
-        local filtered
-        filtered=$(msg_count)
-        log "DEBUG: [HIST] loaded $filtered messages"
     else
         msg_replace_all '[]'
     fi
+    # First refresh with bp=-1 to get MSG_COUNT
+    _msg_segments_refresh_from_messages
+    # Pre-compute bp so first API call doesn't pay cold-start segment cost
+    MSG_BP=$(( MSG_COUNT - ${BASHAGT_CACHE_MSG_TAIL:-2} - 1 ))
+    (( MSG_BP < 0 )) && MSG_BP=-1
+    if (( MSG_BP >= 0 && ${#MESSAGES} < 4096 )); then
+        MSG_BP=$(( MSG_COUNT - 1 ))
+    fi
+    # Re-refresh with correct bp (2nd jq on MESSAGES, one-time init cost)
+    if (( MSG_BP > 0 )); then
+        _msg_segments_refresh_from_messages
+    fi
+    log "DEBUG: [HIST] loaded $MSG_COUNT messages bp=$MSG_BP"
 }
 
 msg_add_user_text() {
-    local text="$1" _new
-    _new=$(jq --arg text "$text" '. + [{"role":"user","content":$text}]' <<< "$MESSAGES" 2>/dev/null) \
-        && MESSAGES="$_new" \
-        || log "WARN: msg_add_user_text jq failed — message not added" >&2
+    local _msg; _msg=$(jq -nc --arg text "$1" '{role:"user","content":$text}')
+    _msg_append_to_tail "$_msg"
     _cc_invalidate msgs
 }
 
 msg_add_assistant() {
-    local content_json="$1" _new
-    _new=$(jq --argjson content "$content_json" \
-        '. + [{"role":"assistant","content":$content}]' 2>/dev/null <<< "$MESSAGES") \
-        && MESSAGES="$_new" \
-        || log "WARN: msg_add_assistant jq failed — message not added" >&2
+    local _msg; _msg=$(jq -nc --argjson content "$1" '{role:"assistant","content":$content}')
+    _msg_append_to_tail "$_msg"
     _cc_invalidate msgs
 }
 
 msg_add_tool_results() {
-    local results_json="$1" _new
-    _new=$(jq --argjson results "$results_json" \
-        '. + [{"role":"user","content":$results}]' 2>/dev/null <<< "$MESSAGES") \
-        && MESSAGES="$_new" \
-        || log "WARN: msg_add_tool_results jq failed — message not added" >&2
+    local _msg; _msg=$(jq -nc --argjson results "$1" '{role:"user","content":$results}')
+    _msg_append_to_tail "$_msg"
     _cc_invalidate msgs
 }
 
@@ -5244,6 +5253,7 @@ msg_last_user_text() {
 msg_replace_all() {
     local new_json="$1"
     MESSAGES="$new_json"
+    MSG_SEGMENTS_DIRTY=1
     _cc_invalidate msgs
 }
 
@@ -6133,6 +6143,151 @@ _bashagt_md_has_content() {
     [[ -n "${_stripped:-}" ]]
 }
 
+# ── Context cache (hash-driven incremental rebuild) ──
+CONTEXT_STATIC=''              # static prefix: pwd + git + platform + shell + model
+CONTEXT_DYN_CACHED=''          # full dyn_msg JSON: {role:"user", content:[{...}]}
+CONTEXT_HASH=''                # composite: time|memory_hash|todo_mtime
+
+# ── Skill list cache (avoid N jq-r forks per turn) ──
+SKILL_LIST_CACHED=''           # pre-built skill list string (with header)
+SKILL_LIST_MTIME=0             # _SKILL_DIR_MTIME when cached
+
+# ── Message segment cache helpers ──
+
+# Append a pre-serialized JSON message to both MESSAGES and TAIL segment.
+# Pure bash — no jq, no fork. O(1) regardless of MESSAGES size.
+_msg_append_to_tail() {
+    local _new_msg_json="$1"
+    if [[ "$MESSAGES" == '[]' ]]; then
+        MESSAGES="[$_new_msg_json]"
+    else
+        MESSAGES="${MESSAGES%\]},${_new_msg_json}]"
+    fi
+    if [[ -z "$MSG_TAIL_INNER" ]]; then
+        MSG_TAIL_INNER="$_new_msg_json"
+    else
+        MSG_TAIL_INNER+=",${_new_msg_json}"
+    fi
+    MSG_COUNT=$((MSG_COUNT + 1))
+}
+
+# Advance bp: move _shift messages from TAIL head to PREFIX tail.
+# Uses 1 small jq on TAIL (usually 2-5 messages, not full MESSAGES).
+_msg_segments_advance_bp() {
+    local _new_bp="$1"
+    local _shift=$((_new_bp - MSG_BP))
+    (( _shift <= 0 )) && return 0
+    local _result; _result=$(jq -c --argjson n "$_shift" '
+        {move: .[:$n], rest: .[$n:]}
+    ' <<< "[${MSG_TAIL_INNER}]")
+    local _move; _move=$(jq -c '.move' <<< "$_result")
+    local _rest; _rest=$(jq -c '.rest' <<< "$_result")
+    # move → PREFIX inner
+    if [[ "$_move" != '[]' ]]; then
+        local _move_inner="${_move:1:$(( ${#_move} - 2 ))}"
+        if [[ -z "$MSG_PREFIX_INNER" ]]; then
+            MSG_PREFIX_INNER="$_move_inner"
+        elif [[ -n "$_move_inner" ]]; then
+            MSG_PREFIX_INNER+=",${_move_inner}"
+        fi
+    fi
+    # rest → TAIL inner
+    if [[ "$_rest" == '[]' ]]; then
+        MSG_TAIL_INNER=''
+    else
+        MSG_TAIL_INNER="${_rest:1:$(( ${#_rest} - 2 ))}"
+    fi
+    MSG_BP=$_new_bp
+}
+
+# Full rebuild of segment cache from MESSAGES (1 jq, only when segments are dirty).
+# Includes content normalization for legacy string-content messages.
+_msg_segments_refresh_from_messages() {
+    local _bp1=$((MSG_BP + 1)) _jsonl
+    _jsonl=$(jq -c --argjson bp1 "$_bp1" '
+        def normalize: .content |= (if type == "string" then [{type:"text", text:.}] else . end);
+        (.[:$bp1] | map(normalize)),
+        (.[$bp1:] | map(normalize)),
+        length
+    ' <<< "$MESSAGES")
+    { IFS= read -r _pfx_array
+      IFS= read -r _tail_array
+      IFS= read -r MSG_COUNT
+    } <<< "$_jsonl"
+    # Strip outer brackets: '[]' → '', '[{...}]' → '{...}'
+    if [[ "$_pfx_array" == '[]' ]]; then
+        MSG_PREFIX_INNER=''
+    else
+        MSG_PREFIX_INNER="${_pfx_array:1:$(( ${#_pfx_array} - 2 ))}"
+    fi
+    if [[ "$_tail_array" == '[]' ]]; then
+        MSG_TAIL_INNER=''
+    else
+        MSG_TAIL_INNER="${_tail_array:1:$(( ${#_tail_array} - 2 ))}"
+    fi
+    MSG_SEGMENTS_DIRTY=0
+}
+
+# ── Context cache helpers ──
+
+# Build static context prefix once (pwd, git, platform, shell, model never change).
+_context_static_init() {
+    local _git; _git=$(git rev-parse --git-dir 2>/dev/null >/dev/null && echo yes || echo no)
+    printf -v CONTEXT_STATIC '%s\n%s\n%s\n%s\n%s\n' \
+        "Working directory: $(pwd)" \
+        "Git repository: $_git" \
+        "Platform: $(uname -s) ($(uname -m))" \
+        "Shell: ${SHELL##*/}" \
+        "Model: ${BASHAGT_MODEL:-unknown}"
+}
+
+# Composite hash: time + memory_pool hash + todo.json mtime.
+# Returns a string that changes only when context inputs change.
+_context_get_hash() {
+    local _t _tm=0
+    printf -v _t '%(%Y-%m-%d %H:%M)T' -1
+    local _tf="${BASHAGT_PROJECT_DIR:-.}/.bashagt/todo.json"
+    [[ -f "$_tf" ]] && _tm=$(_file_mtime "$_tf")
+    printf -v _CONTEXT_HASH_VAL '%s|%s|%s' "$_t" "${MEMORY_CACHE_TS:-0}" "$_tm"
+}
+
+# Rebuild dyn_msg from current context inputs. Called only when hash changes.
+_context_rebuild() {
+    local _now_time; printf -v _now_time '%(%Y-%m-%d %H:%M)T' -1
+    local ctx="${CONTEXT_STATIC}Time: ${_now_time}"
+    local memory_ctx todo_ctx
+    memory_ctx=$(build_memory_context 2>/dev/null) || true
+    todo_ctx=$(build_todo_context 2>/dev/null) || true
+    [[ -n "$memory_ctx" ]] && ctx+=$'\n\n'"$memory_ctx"
+    [[ -n "$todo_ctx" ]] && ctx+=$'\n\n'"$todo_ctx"
+    CONTEXT_DYN_CACHED=$(jq -n -S --rawfile txt <(printf '%s' "$ctx") \
+        '{role:"user", content:[{type:"text", text:$txt}]}')
+    _context_get_hash
+    CONTEXT_HASH="$_CONTEXT_HASH_VAL"
+}
+
+# ── Skill list cache: rebuild only when skills change (_SKILL_DIR_MTIME) ──
+_skill_list_refresh() {
+    if (( _SKILL_DIR_MTIME == SKILL_LIST_MTIME )) && [[ -n "$SKILL_LIST_CACHED" ]]; then
+        return 0
+    fi
+    local _sk_count=0 _sk_list=''
+    for _sn in "${!SKILL_META[@]}"; do
+        (( _sk_count >= 200 )) && break
+        local _sd; _sd=$(echo "${SKILL_META[$_sn]}" | jq -r '.description // ""' 2>/dev/null)
+        local _tag=""
+        [[ " ${ACTIVE_SKILLS[*]} " =~ " ${_sn} " ]] && _tag=" [active]"
+        _sk_list+=$'\n'"  ${_sn}  ${_sd}${_tag}"
+        _sk_count=$((_sk_count + 1))
+    done
+    if [[ -n "$_sk_list" ]]; then
+        SKILL_LIST_CACHED=$'\n\n'"Available skills (use skill(\"<name>\", \"<task>\") to invoke or list_skills to discover):"$_sk_list
+    else
+        SKILL_LIST_CACHED=''
+    fi
+    SKILL_LIST_MTIME=$_SKILL_DIR_MTIME
+}
+
 # ── BP1: Static system prompt (BASHAGT.md + base_prompt + agent_list) ──
 # Dynamic context (CWD/TODO/memory) is deliberately EXCLUDED — it goes
 # into messages[0] so the system prompt stays byte-identical across turns.
@@ -6165,20 +6320,9 @@ Available sub-agents — use agent(\"agent_name\", \"prompt\") for complex multi
 Prefer agent() for: planning before coding, code review, complex searches, summarization.
 ${AGENT_DESCRIPTIONS}"
 
-    # Inject skill list (names + descriptions, max 200). Model invokes
-    # skills via the skill("name", "task") tool or discovers via list_skills.
-    local _sk_count=0 _sk_list=''
-    for _sn in "${!SKILL_META[@]}"; do
-        (( _sk_count >= 200 )) && break
-        local _sd; _sd=$(echo "${SKILL_META[$_sn]}" | jq -r '.description // ""' 2>/dev/null)
-        local _tag=""
-        [[ " ${ACTIVE_SKILLS[*]} " =~ " ${_sn} " ]] && _tag=" [active]"
-        _sk_list+=$'\n'"  ${_sn}  ${_sd}${_tag}"
-        _sk_count=$((_sk_count + 1))
-    done
-    if [[ -n "$_sk_list" ]]; then
-        raw+=$'\n\n'"Available skills (use skill(\"<name>\", \"<task>\") to invoke or list_skills to discover):"$_sk_list
-    fi
+    # Inject skill list from cache (rebuilt only when _SKILL_DIR_MTIME changes)
+    _skill_list_refresh
+    [[ -n "$SKILL_LIST_CACHED" ]] && raw+="$SKILL_LIST_CACHED"
 
     local hash; hash=$(printf '%s' "$raw" | _cc_hash)
 
@@ -6202,26 +6346,18 @@ ${AGENT_DESCRIPTIONS}"
 
 # ── Dynamic context message (always rebuilt, placed as messages[0]) ──
 _pe_assemble_context() {
-    local memory_ctx todo_ctx ctx _git
-    _git=$(git rev-parse --git-dir 2>/dev/null >/dev/null && echo yes || echo no)
-    memory_ctx=$(build_memory_context 2>/dev/null) || true
-    todo_ctx=$(build_todo_context 2>/dev/null) || true
-    ctx=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
-        "Working directory: $(pwd)" \
-        "Git repository: $_git" \
-        "Platform: $(uname -s) ($(uname -m))" \
-        "Shell: ${SHELL##*/}" \
-        "Model: ${BASHAGT_MODEL:-unknown}" \
-        "Time: $(date '+%Y-%m-%d %H:%M')")
-    [[ -n "$memory_ctx" ]] && ctx+=$'\n\n'"$memory_ctx"
-    [[ -n "$todo_ctx" ]] && ctx+=$'\n\n'"$todo_ctx"
+    # Lazy init: static prefix (pwd, git, platform, shell, model) built once
+    [[ -z "$CONTEXT_STATIC" ]] && _context_static_init
 
-    jq -n -S --rawfile txt <(printf '%s' "$ctx") \
-        '{role:"user", content:[{type:"text", text:$txt}]}'
+    _context_get_hash
+    if [[ "$_CONTEXT_HASH_VAL" != "$CONTEXT_HASH" ]] || [[ -z "$CONTEXT_DYN_CACHED" ]]; then
+        _context_rebuild
+        CONTEXT_HASH="$_CONTEXT_HASH_VAL"
+    fi
+    _PE_DYN_MSG="$CONTEXT_DYN_CACHED"
 }
 
-# ── Message prefix builder (no cache_control — markers injected by caller) ──
-# Not cached — bp changes every turn, so hash always differs. Rebuild is cheap.
+# ── Message prefix builder (legacy, used by tests) ──
 _pe_assemble_msg_prefix() {
     local bp="$1"
     local json _bp1=$((bp+1))
@@ -6375,90 +6511,76 @@ _pe_assemble_request() {
     local _emit_markers="${6:-0}"
     local _sys_json="${7:-}"
     local _tools_json="${8:-}"
-    local _tmp
-    _tmp=$(_mktemp_dir /tmp/bashagt_det.XXXXXX)
-    if [[ -z "$_tmp" ]] || [[ ! -d "$_tmp" ]]; then
-        log "ERROR: mktemp failed — cannot create temp directory for request body"
-        return 2
-    fi
 
-    # ── Build components (sys_json from main shell) ──
-    local sys_json="$_sys_json"
-    local dyn_msg; dyn_msg=$(_pe_assemble_context)
-    # Inject ephemeral hook context into dyn_msg (NOT MESSAGES — avoids cache pollution)
+    # 1. Sync bp + ensure segment cache is fresh
+    MSG_BP=${_bp:--1}
+    if (( MSG_SEGMENTS_DIRTY )); then
+        _msg_segments_refresh_from_messages   # 1 jq (only when dirty — rare)
+    fi
+    # 2. Get dyn_msg (hash-cached, 0 jq when unchanged, global to avoid $() subshell)
+    _pe_assemble_context
+    local dyn_msg="$_PE_DYN_MSG"
+
+    # 3. Hook context injection (conditional, 1 small jq)
     if [[ -n "${_HOOK_CONTEXT_BUFFER:-}" ]]; then
         dyn_msg=$(jq -c --arg hc "$_HOOK_CONTEXT_BUFFER" \
             '.content += [{type:"text",text:$hc}]' <<< "$dyn_msg")
     fi
-    local tools_json="${_tools_json:-$(_pe_assemble_tools "$_emit_markers")}"
 
-    # ── Message breakpoint (computed per-turn from formula) ──
-    local msg_prefix_json tail_json _use_bp=${_bp:--1}
-    log "DEBUG: [API] build_request: msgs=$(jq 'length' <<< "$MESSAGES") bp=${_bp:--1} emit_markers=$_emit_markers"
-
-    if (( _use_bp >= 0 )); then
-        msg_prefix_json=$(_pe_assemble_msg_prefix "$_use_bp")  # pure prefix, no cc yet
-        tail_json=$(jq -S ".[$(( _use_bp + 1 )):]" <<< "$MESSAGES")
-
-        # ── Inject cache_control markers on message prefix ──
-        # tools[-1] and system[-1] carry their own markers (BP1/BP2).
-        # Messages get markers at bp (normal: 3 breakpoints total → 4-limit OK)
-        # or old_bp+new_bp (transition: 4 breakpoints total → 4-limit OK).
-        if [[ "$_emit_markers" == "1" ]]; then
-            msg_prefix_json=$(jq -S --argjson pos "$_use_bp" --argjson CM "$CACHE_MARKER_JSON" \
-                'if .[$pos] then .[$pos].content[-1] += $CM else . end' <<< "$msg_prefix_json")
+    # 4. Cache marker on msg_prefix (conditional, 1 small jq)
+    #    sys/tools markers already injected by _pe_assemble_system / _pe_assemble_tools
+    local _pfx_inner="$MSG_PREFIX_INNER"
+    if [[ "$_emit_markers" == "1" ]] && (( MSG_BP >= 0 )); then
+        local _pfx_array; _pfx_array=$(jq -c --argjson pos "$MSG_BP" --argjson CM "$CACHE_MARKER_JSON" \
+            'if .[$pos] then .[$pos].content[-1] += $CM else . end' <<< "[${MSG_PREFIX_INNER}]")
+        if [[ "$_pfx_array" != '[]' ]]; then
+            _pfx_inner="${_pfx_array:1:$(( ${#_pfx_array} - 2 ))}"
+        else
+            _pfx_inner=''
         fi
-    else
-        msg_prefix_json='[]'
-        tail_json="$MESSAGES"
     fi
 
-    # ── Deterministic assembly ──
-    # Prefix first so cache checkpoint covers only stable msgs
-    # (dyn_msg changes per turn and would poison the cache if first)
-    # JSON field order: tools → system → messages (Anthropic-mandated cache prefix order).
-    # tools[-1] cache_control covers tools; system[-1] covers tools+system;
-    # message bp marker covers tools+system+msg_prefix.
-    local full_msgs
-    full_msgs=$(_jq_tempfile "$_tmp" \
-        '$prefix[0] + [$dyn[0]] + $tail[0]' \
-        --json dyn "$dyn_msg" \
-        --json prefix "$msg_prefix_json" \
-        --json tail "$tail_json")
+    # 5. Pure bash: assemble messages array
+    local _msgs="["
 
-    local _body_file="$_tmp/body.json"
+    if [[ -n "$_pfx_inner" ]]; then
+        _msgs+="${_pfx_inner},"
+    fi
+
+    _msgs+="$dyn_msg"
+
+    if [[ -n "$MSG_TAIL_INNER" ]]; then
+        _msgs+=",${MSG_TAIL_INNER}"
+    fi
+    _msgs+="]"
+
+    # 6. Pure bash: assemble final request body ★ 0 jq ★
+    local _model_esc="${model//\\/\\\\}"
+    _model_esc="${_model_esc//\"/\\\"}"
+
+    local _thinking
     if (( tb > 0 )); then
-        _jq_tempfile "$_tmp" \
-            '{model:$model, max_tokens:$max_tokens, tools:$tools[0],
-              system:$system[0], messages:$messages[0], stream:$stream,
-              thinking:{budget_tokens:$thinking_budget, type:"enabled"}}' \
-            --arg model "$model" \
-            --argjson max_tokens "$max_tokens" \
-            --json tools "$tools_json" \
-            --json system "$sys_json" \
-            --json messages "$full_msgs" \
-            --argjson stream "$stream" \
-            --argjson thinking_budget "$tb" > "$_body_file"
+        _thinking='{"budget_tokens":'"$tb"',"type":"enabled"}'
     else
-        _jq_tempfile "$_tmp" \
-            '{model:$model, max_tokens:$max_tokens, tools:$tools[0],
-              system:$system[0], messages:$messages[0], stream:$stream,
-              thinking:{type:"disabled"}}' \
-            --arg model "$model" \
-            --argjson max_tokens "$max_tokens" \
-            --json tools "$tools_json" \
-            --json system "$sys_json" \
-            --json messages "$full_msgs" \
-            --argjson stream "$stream" > "$_body_file"
+        _thinking='{"type":"disabled"}'
     fi
-    local _jq_rc=$?
+
+    local _body
+    printf -v _body \
+        '{"model":"%s","max_tokens":%s,"tools":%s,"system":%s,"messages":%s,"stream":%s,"thinking":%s}\n' \
+        "$_model_esc" "$max_tokens" "$_tools_json" "$_sys_json" "$_msgs" "$stream" "$_thinking"
+
+    # 7. Protocol conversion (conditional, 1 jq on full body — only for OpenAI)
     if [[ "$(_prof_get_field protocol)" == "openai" ]]; then
-        _proto_convert_request < "$_body_file"
+        local _tmp; _tmp=$(_mktemp_dir /tmp/bashagt_det.XXXXXX)
+        printf '%s' "$_body" > "$_tmp/body.json"
+        _proto_convert_request < "$_tmp/body.json"
+        local _rc=$?
+        rm -rf "$_tmp"
+        return $_rc
     else
-        cat "$_body_file"
+        printf '%s' "$_body"
     fi
-    rm -rf "$_tmp"
-    return $_jq_rc
 }
 
 # ============================================================================
@@ -6531,16 +6653,16 @@ call_api_nonstreaming() {
         return 2
     fi
 
-    # Cache profile fields as locals to avoid subshell overhead
+    # Read profile fields directly (avoids 8 $() subshell forks)
     local _ap_model _ap_url _ap_proto _ap_auth_h _ap_auth_px _ap_key _ap_mt _ap_tb
-    _ap_model=$(_prof_get_field model)
-    _ap_url=$(_prof_get_field api_url)
-    _ap_proto=$(_prof_get_field protocol)
-    _ap_auth_h=$(_prof_get_field auth_header)
-    _ap_auth_px=$(_prof_get_field auth_prefix)
-    _ap_key=$(_prof_get_field api_key)
-    _ap_mt=$(_prof_get_field max_tokens)
-    _ap_tb=$(_prof_get_field thinking_budget)
+    _ap_model="${_PROF_MODEL:-$BASHAGT_MODEL}"
+    _ap_url="${_PROF_API_URL:-$BASHAGT_API_URL}"
+    _ap_proto="${_PROF_PROTOCOL:-${BASHAGT_PROTOCOL:-anthropic}}"
+    _ap_auth_h="${_PROF_AUTH_HEADER:-$BASHAGT_AUTH_HEADER}"
+    _ap_auth_px="${_PROF_AUTH_PREFIX:-$BASHAGT_AUTH_PREFIX}"
+    _ap_key="${_PROF_API_KEY:-$BASHAGT_API_KEY}"
+    _ap_mt="${_PROF_MAX_TOKENS:-$BASHAGT_MAX_TOKENS}"
+    _ap_tb="${_PROF_THINKING_BUDGET:-$BASHAGT_THINKING_BUDGET}"
 
     # Auto-reload external sources if changed on disk
     load_bashagt_md
@@ -6557,30 +6679,34 @@ call_api_nonstreaming() {
     _stream_kv status_begin icon "$_icon" label "Thinking..." elapsed_str "0s" >&$_stm_fd
 
     # ── Compute bp from formula each call (per-turn advance) ──
-    local _msg_count _msg_bp
-    _msg_count=$(jq 'length' <<< "$MESSAGES" 2>/dev/null || echo 0)
-    local _msg_tail="${BASHAGT_CACHE_MSG_TAIL:-2}"
-    _msg_bp=$(( _msg_count - _msg_tail - 1 ))
+    local _msg_bp
+    _msg_bp=$(( MSG_COUNT - ${BASHAGT_CACHE_MSG_TAIL:-2} - 1 ))
     (( _msg_bp < 0 )) && _msg_bp=-1
     # Fast path: small total → extend bp to end (tail=0)
     if (( _msg_bp >= 0 && ${#MESSAGES} < 4096 )); then
-        _msg_bp=$(( _msg_count - 1 ))
+        _msg_bp=$(( MSG_COUNT - 1 ))
     fi
 
     # Adjust breakpoint to avoid splitting tool_use/tool_result pairs.
-    # dyn_msg (context user message) is injected between prefix and tail
-    # during assembly. If bp falls on a tool_use message whose tool_result
-    # is in the next message, the context message lands between them and
-    # the API rejects the orphaned tool_use.
-    if (( _msg_bp >= 0 && _msg_bp < _msg_count - 1 )); then
+    # Check the bp message (last in PREFIX) for tool_use — uses small cached segment.
+    if (( _msg_bp >= 0 && _msg_bp < MSG_COUNT - 1 )); then
         local _bp_has_tu
         _bp_has_tu=$(jq -r --argjson i "$_msg_bp" \
-            'any(.[$i].content[]?; .type=="tool_use")' <<< "$MESSAGES" 2>/dev/null || echo false)
+            'any(.[$i].content[]?; .type=="tool_use")' <<< "[${MSG_PREFIX_INNER}]" 2>/dev/null || echo false)
         if [[ "$_bp_has_tu" == "true" ]]; then
             _msg_bp=$((_msg_bp - 1))
         fi
     fi
-
+    # Advance segment cache if bp changed
+    if (( _msg_bp != MSG_BP )); then
+        local _bp_shift=$((_msg_bp - MSG_BP))
+        if (( _bp_shift == 1 && MSG_BP >= 0 )); then
+            _msg_segments_advance_bp "$_msg_bp"   # incremental (small jq on TAIL)
+        else
+            MSG_SEGMENTS_DIRTY=1                   # full refresh (bp big jump)
+            MSG_BP=$_msg_bp
+        fi
+    fi
     _spin_tick
     status_update "$(_build_status "$_SPIN_FRAME" "Thinking..." 0 0 0)"
 
@@ -6593,18 +6719,22 @@ call_api_nonstreaming() {
     local request_body _max_tok_val _sys_json
     _max_tok_val="${EFFECTIVE_MAX_TOKENS:-$_ap_mt}"
     _sys_json=$(_pe_assemble_system "$_emit_markers")  # main shell — _CC writes persist
-    # Build tools_json in main shell so TOOLS_JSON_CACHE persists across turns.
-    # Redirect to temp file to avoid $(...) subshell which would lose cache writes.
-    local _tools_json _tools_tmp; _tools_tmp=$(_mktemp_file)
-    build_tools_json > "$_tools_tmp"
-    _tools_json=$(<"$_tools_tmp"); rm -f "$_tools_tmp"
+    # Read tools: use cache directly when valid (avoids temp file I/O)
+    local _tools_json _epoch; _epoch=${EPOCHSECONDS:-$(date +%s)}
+    if [[ -n "$TOOLS_JSON_CACHE" ]] && (( _epoch - TOOLS_CACHE_EPOCH < 300 )); then
+        _tools_json="$TOOLS_JSON_CACHE"
+    else
+        local _tools_tmp; _tools_tmp=$(_mktemp_file)
+        build_tools_json > "$_tools_tmp"
+        _tools_json=$(<"$_tools_tmp"); rm -f "$_tools_tmp"
+    fi
     _tools_json=$(_pe_assemble_tools "$_emit_markers" "$_tools_json")
     request_body=$(_pe_assemble_request "$_ap_model" "$_max_tok_val" "$_max_tok_val" "false" "$_msg_bp" "$_emit_markers" "$_sys_json" "$_tools_json")
     _HOOK_CONTEXT_BUFFER=""  # consumed — clear for next cycle
 
     # bp finalized — no advance state needed (computed fresh each call)
 
-    log "DEBUG: [API] call_api_nonstreaming: model=$_ap_model max_tok=$_max_tok_val msgs=$(jq 'length' <<< "$MESSAGES" 2>/dev/null || echo 0) thinking=$_ap_tb"
+    log "DEBUG: [API] call_api_nonstreaming: model=$_ap_model max_tok=$_max_tok_val msgs=$MSG_COUNT thinking=$_ap_tb"
 
     _spin_tick
     status_update "$(_build_status "$_SPIN_FRAME" "Thinking..." 0 0 0)"
@@ -13128,7 +13258,7 @@ _rules_reminder_inject() {
 # ── _turn_init — per-turn state reset + input processing ──
 _turn_init() {
     local user_input="$1"
-    log "DEBUG: TURN_BEGIN input_size=${#user_input} msgs=$(jq 'length' <<< "$MESSAGES" 2>/dev/null)"
+    log "DEBUG: TURN_BEGIN input_size=${#user_input} msgs=$MSG_COUNT"
 
     # Reset per-turn state
     _REQUEST_PENDING=0
@@ -13144,8 +13274,10 @@ _turn_init() {
     _STEP_BANNER=""
     _rules_reminder_inject
 
-    # Trim whitespace
-    local _trimmed; _trimmed=$(printf '%s' "$user_input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # Trim whitespace (POSIX-compliant pure bash, avoids sed fork)
+    local _trimmed="$user_input"
+    _trimmed="${_trimmed#${_trimmed%%[![:space:]]*}}"
+    _trimmed="${_trimmed%${_trimmed##*[![:space:]]}}"
 
     # ── Plan confirmation marker (daemon gateway injects this) ──
     if [[ "$_trimmed" == __PLAN_APPROVED__* ]]; then
@@ -13193,7 +13325,7 @@ run_turn() {
         --argjson turn "${TURN_COUNTER:-0}" \
         --argjson streak "${NON_PRODUCTIVE_STREAK:-0}" \
         --argjson active_todos "$(_count_active_todos)" \
-        --arg goal "$(echo "$user_input" | head -1)" \
+        --arg goal "${user_input%%$'\n'*}" \
         '{context:{used:$ctx_used,limit:$ctx_limit,pct:$ctx_pct},turn:{current:$turn,non_productive_streak:$streak},todos:{active:$active_todos},goal:$goal}')
     _hook_results=$(_hook_fire "pre_turn" "$_hook_ctx")
     if [[ "$_hook_results" != "[]" && -n "$_hook_results" ]]; then
@@ -15760,6 +15892,8 @@ main() {
     load_history
     _pe_cache_init
     _agent_sched_init
+    _context_static_init     # build static context prefix once
+    _context_rebuild          # build initial dyn_msg cache
 
     # Init MCP (graceful: failures don't prevent startup)
     if [[ "${BASHAGT_MCP_ENABLED:-true}" == "true" && "$BASHAGT_MODE" != "run" ]]; then
