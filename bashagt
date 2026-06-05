@@ -14402,10 +14402,10 @@ _stream_wrap_turn() {
         _BYPASS_FD=8
     fi
     # Emit spinner frame — renderer self-animates on status_begin.
-    # Skip for slash commands: they process locally without an API call.
-    # (If a slash command falls through to the agent loop, call_api_nonstreaming
-    #  will emit its own status_begin at the right time.)
-    if [[ "$_prompt" != /* ]]; then
+    # Skip for slash commands (with or without /): they process locally.
+    local _first_word="${_prompt%% *}"
+    _first_word="${_first_word#/}"
+    if [[ -z "${SLASH_COMMANDS[$_first_word]:-}" ]]; then
         _stream_kv status_begin icon "$(ui_spinner)" label "Thinking..." elapsed_str "0s" >&8
     fi
     log "DEBUG: [FIFO] setup persistent=$_persistent fd8=$( [[ -e /proc/self/fd/8 ]] && echo ok || echo MISSING ) fd9=$( [[ -e /proc/self/fd/9 ]] && echo ok || echo MISSING ) fifo=$_fifo"
