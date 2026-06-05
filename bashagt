@@ -753,6 +753,10 @@ _PERSISTENT_FIFO=""           # persistent renderer FIFO path (created once at i
 _PERSISTENT_RENDERER_PID=""   # persistent renderer background PID
 _PERSISTENT_RESP_FIFO=""      # response FIFO: renderer writes "ok" on done → main syncs
 
+# ── Unified Process Registry ──
+declare -A _PROC             # pid → "cat|ts|desc"
+_PROCS_FILE=""               # /tmp/bashagt_procs.XXXXXX (created by _proc_init)
+
 
 # ── Slash command registry ──
 # Adding a new slash command: (1) define a _slash_<name>() handler, (2) call
@@ -901,6 +905,123 @@ _detect_termux() {
     [[ -n "${PREFIX:-}" && -d "${PREFIX}/etc" ]] && return 0
     [[ "$OSTYPE" == "linux-android" ]] && return 0
     return 1
+}
+
+# ============================================================================
+# SECTION 2d: Unified Process Registry & Lifecycle Management
+# ============================================================================
+# Every background process is registered in a file-backed registry.
+# Categories define ordered shutdown: timer → hook → trace → tool → agent
+# → api → mcp → worker → renderer.
+
+# Initialize the process registry file.
+_proc_init() {
+    _PROCS_FILE=$(_mktemp_u /tmp/bashagt_procs.XXXXXX) || { _PROCS_FILE=""; return 1; }
+    : > "$_PROCS_FILE"
+    return 0
+}
+
+# Register an already-spawned background process.
+# Usage: _proc_register <pid> <category> <desc>
+_proc_register() {
+    local _pid="$1" _cat="$2" _desc="${3:-}"
+    [[ -z "$_pid" || "$_pid" == "0" ]] && return 1
+    local _ts; _ts=$(_timestamp_ms)
+    _PROC["$_pid"]="$_cat|$_ts|$_desc"
+    [[ -n "$_PROCS_FILE" ]] && printf '%s\t%s\t%s\t%s\n' "$_pid" "$_cat" "$_ts" "$_desc" >> "$_PROCS_FILE"
+    return 0
+}
+
+# Unregister a process from the registry.
+_proc_unregister() {
+    local _pid="$1"
+    unset '_PROC[$_pid]' 2>/dev/null || true
+}
+
+# Kill a registered process tree. Falls back from _pkill_tree to kill on failure.
+_proc_kill() {
+    local _pid="$1" _sig="${2:-TERM}"
+    [[ -z "$_pid" || "$_pid" == "0" ]] && return 1
+    _pkill_tree "$_pid" "$_sig" 2>/dev/null || kill -"$_sig" "$_pid" 2>/dev/null || true
+    _proc_unregister "$_pid"
+}
+
+# Kill all processes in a category.
+_proc_kill_cat() {
+    local _cat="$1" _sig="${2:-TERM}" _pid _entry
+    _proc_reap
+    for _pid in "${!_PROC[@]}"; do
+        _entry="${_PROC[$_pid]}"
+        [[ "${_entry%%|*}" == "$_cat" ]] || continue
+        _pkill_tree "$_pid" "$_sig" 2>/dev/null || kill -"$_sig" "$_pid" 2>/dev/null || true
+        unset '_PROC[$_pid]'
+    done
+}
+
+# Wait for a specific PID with optional timeout (ms). Returns 0 if exited, 1 if timeout.
+_proc_wait() {
+    local _pid="$1" _timeout="${2:-0}" _n=0
+    if (( _timeout > 0 )); then
+        while kill -0 "$_pid" 2>/dev/null && (( _n * 50 < _timeout )); do
+            sleep 0.05; _n=$((_n + 1))
+        done
+        kill -0 "$_pid" 2>/dev/null && return 1
+    else
+        wait "$_pid" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# Sync registry: re-read file, remove dead PIDs, rewrite atomically.
+_proc_reap() {
+    [[ -n "$_PROCS_FILE" && -f "$_PROCS_FILE" ]] || return 0
+    local _line _pid _cat _ts _desc _new="" _live=0
+    while IFS=$'\t' read -r _pid _cat _ts _desc; do
+        [[ -z "$_pid" ]] && continue
+        if kill -0 "$_pid" 2>/dev/null; then
+            _PROC["$_pid"]="$_cat|$_ts|$_desc"
+            printf -v _new '%s%s\t%s\t%s\t%s\n' "$_new" "$_pid" "$_cat" "$_ts" "$_desc"
+            _live=$((_live + 1))
+        else
+            unset '_PROC[$_pid]' 2>/dev/null || true
+        fi
+    done < "$_PROCS_FILE"
+    printf '%s' "$_new" > "${_PROCS_FILE}.tmp" && mv "${_PROCS_FILE}.tmp" "$_PROCS_FILE"
+    return 0
+}
+
+# List all registered processes (debug).
+_proc_list() {
+    _proc_reap
+    local _pid _cat _ts _desc
+    printf '%-8s %-12s %s\n' "PID" "CAT" "DESC"
+    for _pid in "${!_PROC[@]}"; do
+        IFS='|' read -r _cat _ts _desc <<< "${_PROC[$_pid]}"
+        printf '%-8s %-12s %s\n' "$_pid" "$_cat" "$_desc"
+    done
+}
+
+# Ordered shutdown: kill all registered processes by category priority.
+# Categories: timer (0) → hook (1) → trace (2) → tool (3) → agent (4)
+# → api (5) → mcp (6) → worker (7) → renderer (8)
+_proc_shutdown() {
+    local _order=(timer hook trace tool agent api mcp worker renderer) _cat _pid
+    _proc_reap
+    for _cat in "${_order[@]}"; do
+        for _pid in "${!_PROC[@]}"; do
+            [[ "${_PROC[$_pid]%%|*}" == "$_cat" ]] || continue
+            _pkill_tree "$_pid" TERM 2>/dev/null || true
+            unset '_PROC[$_pid]'
+        done
+    done
+    # Reap + force-kill stragglers
+    _proc_reap
+    for _pid in "${!_PROC[@]}"; do
+        _pkill_tree "$_pid" KILL 2>/dev/null || true
+        unset '_PROC[$_pid]'
+    done
+    : > "$_PROCS_FILE"
+    return 0
 }
 
 # Functional nc listen-flag probe. Tries nc -l -p PORT (Linux-OpenBSD/ncat),
@@ -1181,17 +1302,6 @@ _stream_render() {
     _type="${_type%%\"*}"
     [[ -z "$_type" ]] && { printf '%s\n' "$_line"; return 0; }
 
-    # ── Pipeline diagnostics: log every frame type + first text preview ──
-    case "$_type" in
-        done)   log "DEBUG: [RENDER] type=done" ;;
-        text)   log "DEBUG: [RENDER] type=text len=${#_line}" ;;
-        tool_start) log "DEBUG: [RENDER] type=tool_start" ;;
-        tool_end)   log "DEBUG: [RENDER] type=tool_end" ;;
-        tool_tick|tool_output) ;;  # high-frequency, skip
-        status_begin|status_update) ;;  # high-frequency, skip
-        *)      log "DEBUG: [RENDER] type=$_type" ;;
-    esac
-
     case "$_type" in
         done) printf 'ok\n' >&6 2>/dev/null || true; return 1 ;;
         text)
@@ -1217,9 +1327,12 @@ _stream_render() {
             _fields=$(jq -r '[.icon//"",.label//"",.elapsed_str//"",(.tokens_in//0|tostring),(.tokens_out//0|tostring),.desc//""]|join("'$'\036''")' <<< "$_line" 2>/dev/null)
             IFS=$'\036' read -r _icon _label _ela _itok _otok _desc <<< "$_fields"
             if [[ "$_type" == "status_done" ]]; then
+                log "DEBUG: [RENDER] status_done label=[$_label] timer_label=[${_R_SPIN_LABEL:-}] timer_pid=[${_R_SPIN_TIMER_PID:-}]"
                 # Stop self-animation timer
-                [[ -n "${_R_SPIN_TIMER_PID:-}" ]] && kill -USR1 "$_R_SPIN_TIMER_PID" 2>/dev/null || true
-                wait "$_R_SPIN_TIMER_PID" 2>/dev/null || true
+                if [[ -n "${_R_SPIN_TIMER_PID:-}" ]]; then
+                    kill -USR1 "$_R_SPIN_TIMER_PID" 2>/dev/null || true
+                    wait "$_R_SPIN_TIMER_PID" 2>/dev/null || true
+                fi
                 _R_SPIN_TIMER_PID=""
                 local _ts=""
                 if [[ "${_itok:-0}" -gt 0 || "${_otok:-0}" -gt 0 ]]; then
@@ -1234,26 +1347,53 @@ _stream_render() {
             else
                 # Start self-animation timer on first status_begin
                 if [[ "$_type" == "status_begin" && -z "${_R_SPIN_TIMER_PID:-}" ]]; then
+                    log "DEBUG: [RENDER] status_begin START timer label=[$_label]"
                     _R_SPIN_LABEL="$_label"
+                    _R_SPIN_ICON="${_icon:-●}"
+                    _R_SPIN_DESC="${_desc:-}"
                     _R_SPIN_START_TS=$(_timestamp_ms)
+                    if [[ "${_icon:-}" == *"●"* ]]; then
+                        _R_SPIN_USE_DOT=1
+                    else
+                        _R_SPIN_USE_DOT=0
+                    fi
                     (
                         _R_TIMER_RUN=1
                         trap '_R_TIMER_RUN=0' USR1
-                        local _r_elapsed _r_icon _r_st
+                        local _r_elapsed _r_st _r_d _r_tw _r_maxd _r_tick=0
                         while (( _R_TIMER_RUN )); do
                             _r_elapsed=$(( $(_timestamp_ms) - _R_SPIN_START_TS ))
                             (( _r_elapsed < 0 )) && _r_elapsed=0
-                            _spin_tick 2>/dev/null || true
+                            if [[ "${_R_SPIN_USE_DOT:-0}" == "1" ]]; then
+                                (( _r_tick % 5 == 0 )) && { _dot_tick 2>/dev/null || true; _R_SPIN_ICON="${_DOT_FRAME:-●}"; }
+                                _r_st="  ${_R_SPIN_ICON:-●} ${_R_SPIN_LABEL}"
+                            else
+                                _spin_tick 2>/dev/null || true
+                                _r_st="  ${_SPIN_FRAME:-●} ${_R_SPIN_LABEL}"
+                            fi
                             _ui_time $_r_elapsed 2>/dev/null || true
-                            _r_st="  ${_SPIN_FRAME:-●} ${_R_SPIN_LABEL} (${_UI_TIME:-0s})"
+                            _r_st+=" (${_UI_TIME:-0s})"
+                            if [[ -n "${_R_SPIN_DESC:-}" ]]; then
+                                _r_d="${_R_SPIN_DESC}"
+                                _r_tw="${COLUMNS:-80}"
+                                _r_maxd=$(( _r_tw - ${#_r_st} - 4 ))
+                                (( _r_maxd < 10 )) && _r_maxd=10
+                                (( ${#_r_d} > _r_maxd )) && _r_d="${_r_d:0:$_r_maxd}…"
+                                _r_st+=" · ${_r_d}"
+                            fi
                             printf '\r%s\033[K' "$_r_st" 2>/dev/null >/dev/tty || break
                             sleep 0.1
+                            _r_tick=$((_r_tick + 1))
                         done
                     ) &
                     _R_SPIN_TIMER_PID=$!
+                elif [[ "$_type" == "status_begin" ]]; then
+                    log "DEBUG: [RENDER] status_begin IGNORED label=[$_label] existing_timer_label=[${_R_SPIN_LABEL:-}] existing_timer_pid=[${_R_SPIN_TIMER_PID:-}]"
                 fi
                 # /dev/tty bypasses stdio buffering (char device → immediate write()).
-                if [[ -w /dev/tty ]]; then
+                if [[ "${_R_SPIN_USE_DOT:-0}" == "1" && -n "${_R_SPIN_TIMER_PID:-}" ]]; then
+                    :  # dot mode: timer owns the line exclusively, no renderer write
+                elif [[ -w /dev/tty ]]; then
                     local _st_line _d _tw _maxd
                     _st_line="  ${_icon} ${_label} (${_ela})"
                     if [[ -n "$_desc" ]]; then
@@ -1269,6 +1409,10 @@ _stream_render() {
                         _st_line+=" · ${_d}"
                     fi
                     printf '\r%s\033[K' "$_st_line" 2>/dev/null >/dev/tty || true
+                    _R_SPIN_DESC="${_desc:-}"
+                    if [[ "$_label" != "${_R_SPIN_LABEL:-}" ]]; then
+                        log "WARN: [MISMATCH] renderer wrote label=[$_label] but timer has [${_R_SPIN_LABEL:-}] timer_pid=[${_R_SPIN_TIMER_PID:-}]"
+                    fi
                 else
                     printf '\r  %s %s (%s)' "$_icon" "$_label" "$_ela"
                     [[ -n "$_desc" ]] && printf ' %s·%s %s' "$LIGHT_YELLOW" "$RESET" "$_desc"
@@ -1577,6 +1721,7 @@ _dot_tick() {
 
 _interrupted() {
     [[ "${_bagt_interrupted:-0}" == "1" ]] || return 1
+    log "DEBUG: [INT] _interrupted=true caller=${FUNCNAME[1]:-?}:${BASH_LINENO[0]:-0} source=${_INTERRUPT_SOURCE:-?}"
     # Fire on_interrupt hook once (first detection only)
     if [[ "${_HOOK_INTERRUPT_FIRED:-0}" == "0" ]]; then
         _HOOK_INTERRUPT_FIRED=1
@@ -1593,7 +1738,7 @@ _spin_sleep() {
         if [[ "${_ch:-}" == $'\033' ]]; then
             local _seq="" _ch2=""
             while IFS= read -r -s -t 0.01 -n1 _ch2 2>/dev/null; do _seq+="$_ch2"; done
-            [[ -z "$_seq" ]] && { _bagt_interrupted=1; return 1; }
+            [[ -z "$_seq" ]] && { _bagt_interrupted=1; log "DEBUG: [INT] _spin_sleep ESC detected — set _bagt_interrupted=1"; return 1; }
         fi
     fi
     return 0
@@ -1733,14 +1878,15 @@ _hook_fire() {
             esac
         ) >"$_out_file" 2>"$_stderr_file" &
         _hpid=$!
+        _proc_register "$_hpid" "hook" "$_name"
 
         _waited=0
         while kill -0 $_hpid 2>/dev/null && (( _waited < _timeout )); do
-            _spin_sleep 0.02 || { kill $_hpid 2>/dev/null; break; }
+            _spin_sleep 0.02 || { _proc_kill "$_hpid"; break; }
             _waited=$((_waited + 20))
         done
         if kill -0 $_hpid 2>/dev/null; then
-            kill $_hpid 2>/dev/null
+            _proc_kill "$_hpid"
             log "Hook [$_name] timed out after ${_timeout}ms"
         fi
         wait $_hpid 2>/dev/null || true
@@ -1865,7 +2011,7 @@ async_spin() {
     # when fd 8 is available. Fallback to fd 1.
     local _stm_fd=${_BYPASS_FD:-1}
 
-    "$@" > "$out_file" 2>/dev/null &
+    "$@" 8>&- > "$out_file" 2>/dev/null &
     local _pid=$!
 
     "$_tick_fn"; status_begin "$(_build_status "${!_frame_var}" "$label" 0 0 0)"
@@ -1891,9 +2037,13 @@ async_spin() {
         _tick_count=$((_tick_count + 1))
     done
     wait $_pid
-    printf '\033[?25h'
     _async_rc=$?
+    # NOTE: do NOT clear _bagt_interrupted here — let run_turn see it
+    printf '\033[?25h'
     _async_out=$(< "$out_file")
+    local _leaked; _leaked=$(grep -c '^{"type":"' "$out_file" 2>/dev/null || true)
+    _leaked="${_leaked:-0}"
+    (( _leaked > 0 )) && log "WARN: [LEAK] $_leaked frames leaked to agent output file — agent internal fd bypass failed"
     rm -f "$out_file"
 
     _elapsed=$(( $(_timestamp_ms) - _start_ts ))
@@ -5720,7 +5870,8 @@ _compress_api() {
                 '{snap_count:$n,messages:$msgs,snap_hash:$h}' > "$_COMPRESS_RESULT"
             log "L3 async: done (${_snap_size}→${_ns} bytes)"
             _lock_release "$_COMPRESS_LOCK"
-        ) &
+        ) 8>&- &
+        _proc_register $! "agent" "compress_ctx"
         _resolve_profile "$_saved_prof" || _resolve_profile ""
         return 0
     fi
@@ -5797,6 +5948,7 @@ _compress_api() {
     _cc_invalidate msgs
     if [[ -n "$_stext" ]] && [[ "${BASHAGT_MEMORY_ENABLED:-$DEFAULT_MEMORY_ENABLED}" == "true" ]]; then
         ( ${TIMEOUT_CMD:-timeout} 60 call_agent "mem_writer" "Save this compressed conversation. Source: compress. Content: $_stext" >/dev/null 2>&1 || true ) &
+        _proc_register $! "agent" "mem_writer_compress"
     fi
     _resolve_profile "$_saved_prof" || _resolve_profile ""
     return 0
@@ -6815,11 +6967,12 @@ call_api_nonstreaming() {
         --body "$request_body" \
         --err-file "$tmp_dir/curl_err" &
     local _api_pid=$!
+    _proc_register "$_api_pid" "api" "http_post"
 
     # ── Foreground: wait for API with Esc/Ctrl-C interrupt ──
     # Spinner animation is handled by async ticker (_spinner_ticker_start)
     while kill -0 $_api_pid 2>/dev/null; do
-        _spin_sleep 0.1 || { _pkill_tree "$_api_pid" TERM 2>/dev/null || true; break; }
+        _spin_sleep 0.1 || { _proc_kill "$_api_pid"; break; }
     done
     wait $_api_pid
     local _rc=$?
@@ -7198,6 +7351,7 @@ http_sse_connect() {
         "${curl_args[@]}" 2>"$_err_file" > "$_sse_fifo" &
         local _curl_pid=$!
         _BAGT_CURL_PID=$_curl_pid
+        _proc_register "$_curl_pid" "api" "http_sse"
         set -e
 
         # Open FIFO read-end on a dynamic fd (avoids collision with fd 8/9)
@@ -7207,8 +7361,8 @@ http_sse_connect() {
 
         # Polling loop: keyboard + SSE FIFO
         while kill -0 $_curl_pid 2>/dev/null; do
-            _interrupted && { _pkill_tree "$_curl_pid" TERM 2>/dev/null || true; break; }
-            _poll_esc || { _pkill_tree "$_curl_pid" TERM 2>/dev/null || true; break; }
+            _interrupted && { _proc_kill "$_curl_pid"; break; }
+            _poll_esc || { _proc_kill "$_curl_pid"; break; }
             [[ -n "${_sse_spin_cb:-}" ]] && { $_sse_spin_cb || true; }
 
             # Read one SSE line from FIFO (50ms timeout; OS pipe buffer prevents data loss)
@@ -7986,7 +8140,7 @@ tool_agent_batch() {
             _st=$(jq -r '.status // ""' "$_jf" 2>/dev/null)
             [[ "$_st" == "running" ]] || continue
             _pid=$(jq -r '.pid // 0' "$_jf" 2>/dev/null)
-            [[ "$_pid" -gt 0 ]] && _pkill_tree "$_pid" TERM 2>/dev/null || true
+            [[ "$_pid" -gt 0 ]] && _proc_kill "$_pid" TERM
         done
         sleep 0.5
         # Pass 2: KILL survivors + mark cancelled + reset agent idle
@@ -7996,7 +8150,7 @@ tool_agent_batch() {
             _st=$(jq -r '.status // ""' "$_jf" 2>/dev/null)
             if [[ "$_st" == "running" ]]; then
                 _pid=$(jq -r '.pid // 0' "$_jf" 2>/dev/null)
-                [[ "$_pid" -gt 0 ]] && _pkill_tree "$_pid" KILL 2>/dev/null || true
+                [[ "$_pid" -gt 0 ]] && _proc_kill "$_pid" KILL
                 _job_update_status "$jid" "cancelled" '.finished_at = (now | floor)'
                 _ag=$(jq -r '.agent // ""' "$_jf" 2>/dev/null)
                 [[ -n "$_ag" ]] && AGENT_STATUS[$_ag]="idle"
@@ -8005,7 +8159,7 @@ tool_agent_batch() {
             fi
         done
     fi
-
+    # NOTE: do NOT clear _bagt_interrupted — let run_turn see it
     # ---- Phase 4: status_done ----
     local _final_elapsed; _final_elapsed=$(( $(_timestamp_ms) - _start_ts ))
     _diag_ts=$(_timestamp_ms)
@@ -10408,6 +10562,7 @@ plan_to_todos() {
         _start_ts=$(_timestamp_ms)
         plan_extract_steps > "$_extract_tmp" 2>/dev/null &
         _ep=$!
+        _proc_register "$_ep" "agent" "plan_extract"
         _stream_emit "status_begin" "$(jq -nc \
             --arg icon "$_DOT_FRAME" --arg label "list-plan" --arg ela "0s" \
             '{icon: $icon, label: $label, elapsed_str: $ela}')"
@@ -10992,6 +11147,7 @@ _agent_worker_bash() {
         bash -c "$command" > "$result_file" 2>&1 &
     fi
     _pid=$!
+    _proc_register "$_pid" "agent" "worker: ${job_id:0:40}"
     _pgid=$(ps -o pgid= -p $_pid 2>/dev/null | tr -d ' ')
     [[ -z "$_pgid" ]] && _pgid=$_pid
 
@@ -11009,8 +11165,8 @@ _agent_worker_bash() {
         _waited=$((_waited + 1))
     done
     if kill -0 $_pid 2>/dev/null; then
-        kill -TERM -- -$_pgid 2>/dev/null; sleep 2
-        kill -KILL -- -$_pgid 2>/dev/null
+        _proc_kill "$_pid" TERM; sleep 2
+        _proc_kill "$_pid" KILL
         local _sz; _sz=$(wc -c < "$result_file" 2>/dev/null || echo 0)
         _job_update_status "$job_id" "done" \
             ".finished_at = (now | floor) | .result_size = $_sz | .error = \"timed out after ${timeout}s\""
@@ -11181,11 +11337,13 @@ trace_record() {
     local _interval="${BASHAGT_TRACE_SNAPSHOT_INTERVAL:-50}"
     if (( _seq % _interval == 0 )); then
         trace_snapshot 2>/dev/null &
+        _proc_register $! "trace" "snapshot"
     fi
     # Prune if over max
     local _max="${BASHAGT_TRACE_MAX_FRAMES:-1000}"
     if (( _seq > _max + 50 )); then
         trace_prune "$_max" 2>/dev/null &
+        _proc_register $! "trace" "prune"
     fi
 }
 
@@ -12015,6 +12173,7 @@ tool_bash() {
         bash -c "$command" > "$_out_file" 2>&1 &
     fi
     _pid=$!
+    _proc_register "$_pid" "tool" "bash: ${cmd:0:100}"
     _pgid=$(ps -o pgid= -p $_pid 2>/dev/null | tr -d ' ')
     [[ -z "$_pgid" ]] && _pgid=$_pid
 
@@ -12027,7 +12186,7 @@ tool_bash() {
     local _tick=0.1 _max_ticks=$(( timeout_sec * 10 ))
     local _waited=0 _start_ts; _start_ts=$(_timestamp_ms)
     while kill -0 $_pid 2>/dev/null && (( _waited < _max_ticks )); do
-        _spin_sleep $_tick || { kill -TERM -- -$_pgid 2>/dev/null; break; }
+        _spin_sleep $_tick || { _proc_kill "$_pid" TERM; break; }
         _waited=$((_waited + 1))
         (( _waited % 10 == 0 )) && {
             local _ela; _ela=$(ui_time $(( $(_timestamp_ms) - _start_ts )))
@@ -12035,11 +12194,11 @@ tool_bash() {
         }
     done
 
-    # 超时处理: TERM → 2s → KILL 整个进程组
+    # 超时处理: TERM → 2s → KILL 整个进程树
     if kill -0 $_pid 2>/dev/null; then
-        kill -TERM -- -$_pgid 2>/dev/null
+        _proc_kill "$_pid" TERM
         sleep 2
-        kill -KILL -- -$_pgid 2>/dev/null
+        _proc_kill "$_pid" KILL
         wait $_pid 2>/dev/null
         exit_code=124; timed_out=1
     else
@@ -13449,6 +13608,11 @@ run_turn() {
         # Stops when: content received, context full, or permanent error.
         local _content_json=""
         while true; do
+            # Interrupt check (Esc during previous tool) — skip API call
+            if [[ "${_bagt_interrupted:-0}" == "1" ]]; then
+                _content_json=""
+                break
+            fi
             # Context guard: stop retrying if context window is full
             if ! check_turn_budget; then
                 _content_json=""
@@ -13466,6 +13630,7 @@ run_turn() {
             # BEFORE error handling since killed curl returns non-zero.
             if [[ "${_bagt_interrupted:-0}" == "1" ]]; then
                 _bagt_interrupted=0
+                log "DEBUG: [INT] run_turn think-interrupted — cleared _bagt_interrupted"
                 if [[ -n "${_FMT_LINEBUF:-}" ]]; then
                     local _partial; _partial=$(jq -nc --arg text "$_FMT_LINEBUF" '[{type:"text",text:$text}]')
                     msg_add_assistant "$_partial"
@@ -13505,6 +13670,23 @@ run_turn() {
             _stream_emit "warning" "$(jq -nc --arg c 'Empty API response, retrying in 1s...' '{content: $c}')"
             sleep 1
         done
+
+        # Interrupt check after retry loop — Esc pressed during tool dispatch
+        if [[ "${_bagt_interrupted:-0}" == "1" ]]; then
+            _bagt_interrupted=0
+            log "DEBUG: [INT] run_turn tool-interrupt — cleared _bagt_interrupted"
+            accumulate_turn_tokens
+            local _ts_msg; _ts_msg=$(printf '%s %s │ %s %s' \
+                "$(ui_label '──' gray)" \
+                "$(ui_time $(( $(_timestamp_ms) - turn_start )))" \
+                "$(ui_tokens $TURN_INPUT_ACCUM $TURN_OUTPUT_ACCUM)" \
+                "$(ui_label '──' gray)")
+            _stream_emit "warning" "$(jq -nc '{content: "Turn interrupted (Esc/Ctrl-C)"}')"
+            _stream_emit "info" "$(jq -nc --arg c "$_ts_msg" '{content: $c}')"
+            log "DEBUG: TURN_END  stop=interrupted rounds=$_round tok_in=$TURN_INPUT_TOKENS tok_out=$TURN_OUTPUT_TOKENS"
+            save_history
+            return 0
+        fi
 
         local content_json="$_content_json"
 
@@ -13800,6 +13982,7 @@ run_turn() {
                     local result
                     result=$(format_tool_result "$tool_id" "$tool_output" "$is_error")
                     results_json=$(echo "$results_json" | jq --argjson r "$result" '. + [$r]')
+                    [[ "${_bagt_interrupted:-0}" == "1" ]] && break
                 done
 
                 if [[ "${_SAFE_DENIED:-0}" == "1" ]]; then
@@ -14147,6 +14330,7 @@ _persistent_renderer_init() {
         done < "$_PERSISTENT_FIFO"
     ) 1>&2 &
     _PERSISTENT_RENDERER_PID=$!
+    _proc_register "$_PERSISTENT_RENDERER_PID" "renderer" "persistent"
     # Blocks until renderer opens read end (FIFO rendezvous).
     # After open() succeeds, renderer still needs ~1 scheduler tick to enter read loop.
     exec 7>"$_PERSISTENT_FIFO"
@@ -14161,12 +14345,12 @@ _persistent_renderer_teardown() {
     exec 7>&- 2>/dev/null || true       # close persistent write end
     # Other fds (1, 8) may still point to the FIFO (e.g. inside _stream_wrap_turn
     # during /exit). Send SIGTERM to guarantee renderer exit, SIGKILL as fallback.
-    kill "$_PERSISTENT_RENDERER_PID" 2>/dev/null || true
+    _proc_kill "$_PERSISTENT_RENDERER_PID" TERM
     local _wait_n=0
     while kill -0 "$_PERSISTENT_RENDERER_PID" 2>/dev/null && (( _wait_n < 20 )); do
         sleep 0.05; _wait_n=$((_wait_n + 1))
     done
-    kill -0 "$_PERSISTENT_RENDERER_PID" 2>/dev/null && kill -9 "$_PERSISTENT_RENDERER_PID" 2>/dev/null || true
+    kill -0 "$_PERSISTENT_RENDERER_PID" 2>/dev/null && _proc_kill "$_PERSISTENT_RENDERER_PID" KILL
     wait "$_PERSISTENT_RENDERER_PID" 2>/dev/null || true
     rm -f "$_PERSISTENT_FIFO" 2>/dev/null || true
     exec 6>&- 2>/dev/null || true              # close response FIFO fd
@@ -14230,8 +14414,9 @@ _stream_wrap_turn() {
     local _saved_int
     if [[ $_to_stderr == "true" ]]; then
         _saved_int=$(trap -p INT 2>/dev/null)
-        trap '_bagt_interrupted=1' INT
+        trap '_bagt_interrupted=1; log "DEBUG: [INT] SIGINT trap — set _bagt_interrupted=1"' INT
         _bagt_interrupted=0
+        log "DEBUG: [INT] turn start — cleared _bagt_interrupted"
         _SAFE_DENIED=0
     fi
 
@@ -14290,7 +14475,7 @@ agent_loop() {
     # ── Non-interactive: oneshot or pipe — unified stdin path ──
     if [[ "${BASHAGT_MODE:-interactive}" == "oneshot" ]] || [[ ! -t 0 ]]; then
         trap 'mcp_shutdown; save_history; exit 130' INT
-        trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _persistent_renderer_teardown; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; _worker_shutdown; mcp_shutdown; save_history' EXIT TERM
+        trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _persistent_renderer_teardown; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; _proc_shutdown; save_history' EXIT TERM
         _pe_cache_init
         # Read up to 1MB — cap prevents OOM on accidental binary pipe
         local input; input=$(dd bs=1048576 count=1 2>/dev/null)
@@ -14317,6 +14502,7 @@ agent_loop() {
     fi
 
     # Interactive mode
+    _proc_init || true
     print_banner
     _persistent_renderer_init || true  # one-time FIFO + renderer (survives all turns)
 
@@ -14345,7 +14531,7 @@ agent_loop() {
         # read -s interrupted by SIGINT restores its saved -echo state
         # AFTER the trap handler returns.  Prepend stty echo to the EXIT
         # trap that _input_cleanup just set.
-        trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _persistent_renderer_teardown; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; stty echo 2>/dev/null || true; _worker_shutdown; mcp_shutdown; save_history' EXIT
+        trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _persistent_renderer_teardown; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; stty echo 2>/dev/null || true; _proc_shutdown; save_history' EXIT
         exit 0
     }
 
@@ -14466,6 +14652,7 @@ mcp_transport_stdio_connect() {
     fi
 
     MCP_SERVER_PID[$_name]=$_pid
+    _proc_register "$_pid" "mcp" "server:$_name"
     MCP_SERVER_DIR[$_name]="$_dir"
     MCP_SERVER_TRANSPORT[$_name]="stdio"
 
@@ -14682,7 +14869,7 @@ mcp_recv() {
 mcp_disconnect_server() {
     local _name="$1"
     local _pid="${MCP_SERVER_PID[$_name]:-}" _dir="${MCP_SERVER_DIR[$_name]:-}"
-    [[ -n "$_pid" ]] && _pkill_tree "$_pid" TERM 2>/dev/null || true
+    [[ -n "$_pid" ]] && _proc_kill "$_pid" TERM
     rm -f "${TMPDIR:-/tmp}/bashagt_mcp_${BASHAGT_DAEMON_PID:-$$}_${_pid}" 2>/dev/null || true
     [[ -n "$_dir" ]] && rm -rf "$_dir" 2>/dev/null || true
     unset "MCP_SERVER_PID[$_name]" "MCP_SERVER_DIR[$_name]" "MCP_SERVER_TOOLS[$_name]"
@@ -14958,6 +15145,7 @@ _session_ensure_worker() {
     # Start persistent worker
     ( _session_worker_loop "$_sid" "$_dir" ) &
     SESSION_WORKER_PID[$_sid]=$!
+    _proc_register "$!" "worker" "session:$_sid"
 }
 
 _session_worker_loop() {
@@ -14990,18 +15178,18 @@ _worker_shutdown() {
     local _sid _pid
     for _sid in "${!SESSION_WORKER_PID[@]}"; do
         _pid="${SESSION_WORKER_PID[$_sid]}"
-        kill "$_pid" 2>/dev/null || true
+        _proc_kill "$_pid"
     done
 }
 
 _spm_shutdown() {
     local _pid
     for _pid in "${!SUBPROC[@]}"; do
-        _pkill_tree "$_pid" TERM 2>/dev/null || true
+        _proc_kill "$_pid" TERM
     done
     sleep 2
     for _pid in "${!SUBPROC[@]}"; do
-        _pkill_tree "$_pid" KILL 2>/dev/null || true
+        _proc_kill "$_pid" KILL
         unset "SUBPROC[$_pid]"
     done
     SUBPROC_COUNT=0
@@ -15039,7 +15227,7 @@ session_list() {
 
 session_delete() {
     local _sid="$1" _dir="$HOME/.bashagt/sessions/$_sid"
-    [[ -n "${SESSION_WORKER_PID[$_sid]:-}" ]] && kill "${SESSION_WORKER_PID[$_sid]}" 2>/dev/null || true
+    [[ -n "${SESSION_WORKER_PID[$_sid]:-}" ]] && _proc_kill "${SESSION_WORKER_PID[$_sid]}"
     unset "SESSION_WORKER_PID[$_sid]" 2>/dev/null || true
     _scheduler_remove_session "$_sid"  # optimization #6
     [[ -d "$_dir" ]] && rm -rf "$_dir"
@@ -16102,8 +16290,8 @@ main() {
             LOG_LEVEL_NUM=0
             BASHAGT_LOG_STDERR=1
             printf 'bashagt daemon on port %s (PID %s) [foreground, DEBUG]\n' "$_port" "$$"
-            trap '_worker_shutdown; mcp_shutdown; save_history; exit 130' INT
-            trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _persistent_renderer_teardown; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; _worker_shutdown; mcp_shutdown; save_history' EXIT TERM
+            trap '_proc_shutdown; save_history; exit 130' INT
+            trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _persistent_renderer_teardown; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; _proc_shutdown; save_history' EXIT TERM
             _daemon_main
         else
             # Port pre-check before forking — fail fast if port is taken
@@ -16129,8 +16317,8 @@ main() {
         fi
     fi
 
-    trap '_worker_shutdown; mcp_shutdown; save_history; exit 130' INT
-    trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _persistent_renderer_teardown; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; _worker_shutdown; mcp_shutdown; save_history' EXIT TERM
+    trap '_proc_shutdown; save_history; exit 130' INT
+    trap '(( STATUS_ACTIVE )) && printf "\n\033[K" >&2 || true; _persistent_renderer_teardown; _hook_fire "on_cleanup" "{}" >/dev/null 2>&1 || true; _proc_shutdown; save_history' EXIT TERM
 
     # ── post_init hook — startup injection ──
     local _pi_ctx _pi_results _pi_item
