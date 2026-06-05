@@ -13585,6 +13585,14 @@ run_turn() {
         done < <(jq -c '.[]' <<< "$_hook_results" 2>/dev/null)
     fi
 
+    # ── Safe mode active notice (dynamic per-turn injection) ──
+    if [[ "${BASHAGT_SAFE_MODE:-0}" == "1" ]]; then
+        _HOOK_CONTEXT_BUFFER+=$'\n'"--- SAFE MODE ACTIVE ---"$'\n'\
+"Safe mode is ON. Destructive tools (write_file, edit_file, delete_file, bash) will be intercepted for user confirmation before execution. "\
+"If a tool returns {\"status\":\"denied\"}, this is a definitive user rejection — do NOT retry. "\
+"To disable safe mode, the user can press Shift+Tab or type /safe off."$'\n'
+    fi
+
     # Track time
     local turn_start turn_end elapsed_ms
     turn_start=$(_timestamp_ms)
