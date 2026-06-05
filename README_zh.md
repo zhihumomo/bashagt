@@ -806,6 +806,26 @@ cd test
 
 ## 📝 更新日志
 
+### 2026-06-05 — 零 Fork 热路径 & 持久化渲染器
+
+**⚡ 零 Fork 热路径** — 增量消息分段缓存（`MSG_PREFIX_INNER`/`MSG_TAIL_INNER`）替代每次消息追加时的全量 jq。`_msg_append_to_tail()` 使用纯 bash 字符串操作 — O(1)，零 jq fork。哈希驱动上下文缓存（`CONTEXT_STATIC` + `_context_rebuild`）仅在时间/记忆/TODO 变化时重建动态上下文。Skill 列表按 `_SKILL_DIR_MTIME` 缓存，工具 JSON 300s TTL 缓存。`_pe_assemble_request()` 热路径用 `printf -v` 构建请求体 — 常见路径零 jq。Profile 字段直接从 `_PROF_*` 全局变量读取（消除每次 API 调用 8 个 subshell fork）。`_hook_fire()` 支持输出到文件模式避免 `$()` subshell。`_hook_job_context()` 将所有 job 文件批量合并为单次 `jq -s`。
+
+**🖥️ 持久化渲染器** — 交互模式通过 `_persistent_renderer_init()` 一次性创建 FIFO + 渲染器，通过 fd 7 跨所有回合复用。消除每轮 `mkfifo` + fork + wait + `rm` 的开销。渲染器自驱动 spinner 动画（0.1s 定时器，`/dev/tty`），主进程不再负责动画。`done` 帧不再杀死渲染器 — 渲染器跨回合持续运行。
+
+**🛡️ 管道韧性** — `trap '' PIPE` 防止 SIGPIPE 杀死 shell。`tool_start`/`tool_end` 的 `_stream_emit` 优雅处理 FIFO 断裂。`_in_dispatch` 通知输出重定向到 `/dev/tty` 绕过可能已断的 stdout。FIFO 拆除三级 fd 恢复链：`1>&9` → `1>&2` → `/dev/tty`。渲染器拆除增加 SIGTERM→SIGKILL 超时回退。
+
+**🐛 Bug 修复** — `_json_unescape()` 使用 `printf -v _bs` 获取反斜杠（避免某些 shell 的 `\}` 解析风险）。`_in_buf_reposition()` 和 `_in_buf_redraw_line()` 在旧渲染存在自动换行时回退到全量重绘。`_in_buf_redraw()` 在 `\033[J` 前添加 `\r` 防止多行收缩后的光标漂移残留。
+
+本次更新还包括：
+- 系统提示词：在 §1 ROLE & IDENTITY 中新增 "Reasoning Effort: Absolute maximum" 深度推理指令
+- 续行提示符 `⋯` → `⋯ `（末尾空格）
+- `_stream_render`、`http_sse_connect`、`_stream_wrap_turn` 管道诊断 DEBUG 日志
+- `_tm()` 延迟追踪通过 `BASHAGT_TIMING` 环境变量控制
+- `SYS_JSON_CACHE`：系统提示词 JSON 缓存至 BASHAGT.md/skills 变更
+- `_count_active_todos()`：30s TTL 缓存
+- `load_bashagt_md` / `_reload_skills_if_stale`：每轮 stat 检查（移除节流以保证正确性）
+- 测试修复：`test_ui_primitives.sh` SPINNER 数组初始化及 T3 断言；`test_protocol_assembly.sh` `_PE_DYN_MSG` 全局变量适配
+
 ### 2026-06-04 — 架构加固与 Bug 修复
 
 **🏗️ 架构** — `init_system_dirs()` (831→21 行) 拆分为 `_init_settings_template()` 和 `_init_system_agents()`。新增 JSON 消息访问门面 — `msg_count()`、`msg_last_user_text()`、`msg_replace_all()` — 统一消息数组读写入口。`_cc_invalidate msgs` 集中到 `msg_add_*` 和 `msg_replace_all` 中，消除分散的缓存失效调用。`_turn_init()` 从 `run_turn()` 中提取为独立函数（48 行）。`_turn_flush_feedback()` 和 `_turn_flush_assistant()` 将 10 处分散的延迟读取收敛为 2 个专用刷新函数。`http_retry()` 指数退避 + 全抖动包装 S5 压缩 HTTP 调用。

@@ -808,6 +808,26 @@ cd test
 
 ## 📝 Changelog
 
+### 2026-06-05 — Zero-Fork Hot Path & Persistent Renderer
+
+**⚡ Zero-Fork Hot Path** — incremental message segment cache (`MSG_PREFIX_INNER`/`MSG_TAIL_INNER`) replaces full-array jq on every message append. `_msg_append_to_tail()` uses pure-bash string manipulation — O(1), zero jq forks. Hash-driven context cache (`CONTEXT_STATIC` + `_context_rebuild`) rebuilds dynamic context only when time/memory/todo change. Skill list cached by `_SKILL_DIR_MTIME`, tools JSON cached with 300s TTL. `_pe_assemble_request()` hot path uses `printf -v` for body assembly — zero jq in the common path. Profile fields read directly from `_PROF_*` globals (eliminates 8 subshell forks per API call). `_hook_fire()` output-to-file mode avoids `$()` subshell. `_hook_job_context()` batches all job files into a single `jq -s` call.
+
+**🖥️ Persistent Renderer** — interactive mode now creates FIFO + renderer once in `_persistent_renderer_init()` and reuses them across all turns via fd 7. Eliminates per-turn `mkfifo` + fork + wait + `rm` overhead. Renderer self-animates its own spinner (0.1s timer, `/dev/tty`), offloading animation from the main process. `done` frame no longer kills the renderer — it stays alive across turns.
+
+**🛡️ Pipeline Resilience** — `trap '' PIPE` prevents SIGPIPE from killing the shell. `_stream_emit` for `tool_start`/`tool_end` handles broken FIFO gracefully. `_in_dispatch` notification routes to `/dev/tty` bypassing possibly-broken stdout. FIFO teardown has a 3-tier fd recovery chain: `1>&9` → `1>&2` → `/dev/tty`. Renderer teardown adds SIGTERM→SIGKILL fallback with timeout polling.
+
+**🐛 Bug Fixes** — `_json_unescape()` uses `printf -v _bs` for backslash (avoids `\}` parse risk in certain shells). `_in_buf_reposition()` and `_in_buf_redraw_line()` fall back to full redraw when old render had auto-wrapped rows. `_in_buf_redraw()` adds `\r` before `\033[J` to prevent cursor drift artifacts after multi-line shrinkage.
+
+Also in this update:
+- System prompt: "Reasoning Effort: Absolute maximum" deep-thinking directive added to §1 ROLE & IDENTITY
+- Continuation prompt `⋯` → `⋯ ` (trailing space)
+- Pipeline diagnostic DEBUG logging in `_stream_render`, `http_sse_connect`, `_stream_wrap_turn`
+- `_tm()` latency tracing controllable via `BASHAGT_TIMING` env var
+- `SYS_JSON_CACHE`: system prompt JSON cached until BASHAGT.md/skills change
+- `_count_active_todos()`: 30s TTL cache
+- `load_bashagt_md` / `_reload_skills_if_stale`: file stat every turn (throttle removed for correctness)
+- Test fixes: `SPINNER` array init, T3 wrap expectation in `test_ui_primitives.sh`; `_PE_DYN_MSG` global in `test_protocol_assembly.sh`
+
 ### 2026-06-04 — Architecture Hardening & Bug Fixes
 
 **🏗️ Architecture** — `init_system_dirs()` (831→21 lines) decomposed into `_init_settings_template()` and `_init_system_agents()`. New JSON message access facade — `msg_count()`, `msg_last_user_text()`, `msg_replace_all()` — single source of truth for message array reads/writes. `_cc_invalidate msgs` centralized into `msg_add_*` and `msg_replace_all`, eliminating scattered cache invalidation. `_turn_init()` extracted from `run_turn()` (48 lines → standalone function). `_turn_flush_feedback()` and `_turn_flush_assistant()` converge 10 deferred-read sites into 2 dedicated flush functions. `http_retry()` with exponential backoff + full jitter wraps S5 compression HTTP calls.
