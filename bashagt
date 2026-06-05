@@ -991,9 +991,14 @@ _install_symlink() {
     ln -sf "$_target" "$_link" 2>/dev/null || true
 }
 
-# TEMPORARY TIMING — remove after measurement
-_TM_LOG="/tmp/bashagt_timing_$$.log"
-_tm() { local _n; _n=$(_timestamp_ms); printf 'TIMING: %s ms=%s\n' "$1" "$_n" >> "$_TM_LOG"; }
+# ── Latency tracing: lightweight timing checkpoints ──
+# Set BASHAGT_TIMING=0 to disable. Writes to $LOG_DIR/timing.log (or /tmp fallback).
+_tm() {
+    [[ "${BASHAGT_TIMING:-1}" != "0" ]] || return 0
+    [[ -z "${_TM_LOG:-}" ]] && _TM_LOG="${LOG_DIR:-/tmp}/timing.log"
+    local _n; _n=$(_timestamp_ms)
+    printf 'TIMING: %s ms=%s\n' "$1" "$_n" >> "$_TM_LOG"
+}
 
 # Portable file mtime (epoch seconds). GNU: stat -c %Y, BSD: stat -f %m
 _file_mtime() {
@@ -1684,10 +1689,16 @@ _hook_render_template() {
 # Returns: JSON array of handler output objects (via stdout). Caller reads via $().
 # Each handler runs in isolated subprocess with timeout; interrupt-aware.
 _hook_fire() {
-    local _point="$1" _ctx="${2:-{}}"
+    local _point="$1" _ctx="${2:-{}}" _out_result="${3:-}"
     local _hook_start_ts; _hook_start_ts=$(_timestamp_ms)
     local _names="${HOOK_POINTS[$_point]:-}"
-    [[ -z "$_names" ]] && { echo '[]'; return 0; }
+    if [[ -z "$_names" ]]; then
+        if [[ -n "$_out_result" ]]; then
+            echo '[]' > "$_out_result"
+        else
+            echo '[]'
+        fi
+    fi
 
     local _name _type _handler _meta _timeout _stderr_file _out_file _result_json _hpid _waited
     _stderr_file=$(_mktemp_file "/tmp/bashagt_hook_stderr.XXXXXX")
@@ -1744,10 +1755,14 @@ _hook_fire() {
 
     log "DEBUG: HOOK_FIRE  point=$_point results=${#_results[@]} elapsed=$(( $(_timestamp_ms) - _hook_start_ts ))ms"
 
+    local _output='[]'
     if ((${#_results[@]} > 0)); then
-        printf '%s\n' "${_results[@]}" | jq -sc '.' 2>/dev/null || echo '[]'
+        _output=$(printf '%s\n' "${_results[@]}" | jq -sc '.' 2>/dev/null || echo '[]')
+    fi
+    if [[ -n "$_out_result" ]]; then
+        printf '%s' "$_output" > "$_out_result"
     else
-        echo '[]'
+        printf '%s' "$_output"
     fi
 }
 
@@ -5193,18 +5208,22 @@ load_config() {
 }
 
 # Load BASHAGT.md project context
+# Throttled: file stat only every _LOAD_MD_TTL turns (file rarely changes mid-session)
+_LOAD_MD_TURN=0
+_LOAD_MD_TTL=5
 load_bashagt_md() {
+    (( _LOAD_MD_TURN++ < _LOAD_MD_TTL )) && return 0
+    _LOAD_MD_TURN=0
     local _f=".bashagt/BASHAGT.md" _cur
     if [[ -f "$_f" ]]; then
         _cur=$(_file_mtime "$_f")
         if [[ "$_cur" != "${_BASHAGT_MD_MTIME:-0}" ]]; then
             BASHAGT_MD=$(<"$_f")
             _BASHAGT_MD_MTIME="$_cur"
-            _cc_invalidate system
+            SYS_JSON_CACHE=""
         fi
     else
-        BASHAGT_MD=""
-        _BASHAGT_MD_MTIME=0
+        [[ -n "$BASHAGT_MD" ]] && { BASHAGT_MD=""; SYS_JSON_CACHE=""; }
     fi
     return 0
 }
@@ -6154,7 +6173,12 @@ _pe_cache_init() {
 
 # Check skill directories for mtime changes; reload and invalidate cache if stale.
 # Called by _pe_assemble_system() each turn before building the skill list.
+# Throttled: directory stat only every _RELOAD_SKILLS_TTL turns
+_RELOAD_SKILLS_TURN=0
+_RELOAD_SKILLS_TTL=5
 _reload_skills_if_stale() {
+    (( _RELOAD_SKILLS_TURN++ < _RELOAD_SKILLS_TTL )) && return 0
+    _RELOAD_SKILLS_TURN=0
     local _cur=0 _dir
     for _dir in "$HOME/.bashagt/skills/" .bashagt/skills/; do
         [[ -d "$_dir" ]] && { local _m; _m=$(_file_mtime "$_dir"); (( _m > _cur )) && _cur=$_m; }
@@ -6162,7 +6186,7 @@ _reload_skills_if_stale() {
     if (( _cur != ${_SKILL_DIR_MTIME:-0} )); then
         load_skills
         _SKILL_DIR_MTIME=$_cur
-        _cc_invalidate system
+        SYS_JSON_CACHE=""
     fi
 }
 
@@ -6755,7 +6779,13 @@ call_api_nonstreaming() {
 
     local request_body _max_tok_val _sys_json
     _max_tok_val="${EFFECTIVE_MAX_TOKENS:-$_ap_mt}"
-    _sys_json=$(_pe_assemble_system "$_emit_markers")  # main shell — _CC writes persist
+    # System prompt cache: rebuild only when invalidated (BASHAGT.md/skills change)
+    if [[ -n "$SYS_JSON_CACHE" ]]; then
+        _sys_json="$SYS_JSON_CACHE"
+    else
+        _sys_json=$(_pe_assemble_system "$_emit_markers")
+        SYS_JSON_CACHE="$_sys_json"
+    fi
     # Read tools: use cache directly when valid (avoids temp file I/O)
     local _tools_json _epoch; _epoch=${EPOCHSECONDS:-$(date +%s)}
     if [[ -n "$TOOLS_JSON_CACHE" ]] && (( _epoch - TOOLS_CACHE_EPOCH < 300 )); then
@@ -6765,7 +6795,10 @@ call_api_nonstreaming() {
         build_tools_json > "$_tools_tmp"
         _tools_json=$(<"$_tools_tmp"); rm -f "$_tools_tmp"
     fi
-    _tools_json=$(_pe_assemble_tools "$_emit_markers" "$_tools_json")
+    if [[ "$_emit_markers" == "1" ]]; then
+        _tools_json=$(_pe_assemble_tools "$_emit_markers" "$_tools_json")
+    fi
+    # else: _tools_json already has the cached value, _pe_assemble_tools is pure passthrough
     _tm "call_api_sys_tools_done"
     request_body=$(_pe_assemble_request "$_ap_model" "$_max_tok_val" "$_max_tok_val" "false" "$_msg_bp" "$_emit_markers" "$_sys_json" "$_tools_json")
     _tm "call_api_request_done"
@@ -9839,11 +9872,20 @@ save_todos() {
 
 # ── _count_active_todos ──
 # Returns count of non-completed TODOs. Used by pre_turn hook context.
+_ACTIVE_TODOS_CACHED=""
+_ACTIVE_TODOS_TS=0
 _count_active_todos() {
+    local _now=${EPOCHSECONDS:-$(date +%s)}
+    if [[ -n "${_ACTIVE_TODOS_CACHED:-}" ]] && (( _now - _ACTIVE_TODOS_TS < 30 )); then
+        printf '%s' "$_ACTIVE_TODOS_CACHED"
+        return
+    fi
     local _count=0
     if [[ -n "${TODOS:-}" && "$TODOS" != "null" ]]; then
         _count=$(jq '[.[] | select(.status != "completed")] | length' <<< "$TODOS" 2>/dev/null || echo 0)
     fi
+    _ACTIVE_TODOS_CACHED="$_count"
+    _ACTIVE_TODOS_TS=$_now
     printf '%s' "$_count"
 }
 
@@ -10747,34 +10789,33 @@ _hook_job_context() {
     local _dir="${JOBS_DIR:-}"
     [[ -d "$_dir" ]] || { jq -nc '{inject:false}'; return; }
 
-    local _now _active=0 _summary="" _f _st _id _agent _prompt _created _elapsed _rf
+    # Single jq invocation extracts all fields from all job files at once
+    local _now _active=0 _summary="" _jobs_json
     _now=${EPOCHSECONDS:-$(date +%s 2>/dev/null || echo 0)}
+    _jobs_json=$(jq -s '[.[] | {status, id, agent, prompt, created_at, result_file}]' "$_dir"/*.json 2>/dev/null || echo '[]')
 
-    for _f in "$_dir"/*.json; do
-        [[ -f "$_f" ]] || continue
-        _st=$(jq -r '.status // ""' "$_f" 2>/dev/null)
+    if [[ "$_jobs_json" == "[]" || -z "$_jobs_json" ]]; then
+        jq -nc '{inject:false}'; return
+    fi
+
+    # Extract all fields in one jq call: tab-separated lines
+    while IFS=$'\t' read -r _st _id _agent _prompt _created _rf; do
+        [[ -z "$_st" ]] && continue
         case "$_st" in
             queued|running)
                 _active=$((_active + 1))
-                _id=$(jq -r '.id // "?"' "$_f" 2>/dev/null)
-                _agent=$(jq -r '.agent // "?"' "$_f" 2>/dev/null)
-                _prompt=$(jq -r '.prompt // ""' "$_f" 2>/dev/null)
-                _created=$(jq -r '.created_at // 0' "$_f" 2>/dev/null)
-                _elapsed=$((_now - _created))
+                _elapsed=$((_now - ${_created:-0}))
                 (( _elapsed < 0 )) && _elapsed=0
                 (( ${#_prompt} > 200 )) && _prompt="${_prompt:0:197}..."
-                _summary+="  [${_st} ${_elapsed}s] ${_id} → ${_agent}: \"${_prompt}\""$'\n'
+                _summary+="  [${_st} ${_elapsed}s] ${_id:-?} → ${_agent:-?}: \"${_prompt}\""$'\n'
                 ;;
             done)
-                _rf=$(jq -r '.result_file // ""' "$_f" 2>/dev/null)
                 if [[ -n "$_rf" && -f "$_rf" ]]; then
-                    _id=$(jq -r '.id // "?"' "$_f" 2>/dev/null)
-                    _agent=$(jq -r '.agent // "?"' "$_f" 2>/dev/null)
-                    _summary+="  [ready] ${_id} → ${_agent} (result available)"$'\n'
+                    _summary+="  [ready] ${_id:-?} → ${_agent:-?} (result available)"$'\n'
                 fi
                 ;;
         esac
-    done
+    done < <(jq -r '.[] | [.status//"", .id//"?", .agent//"?", .prompt//"", (.created_at//0|tostring), .result_file//""] | @tsv' <<< "$_jobs_json" 2>/dev/null)
 
     if (( _active == 0 )) && [[ -z "$_summary" ]]; then
         jq -nc '{inject:false}'
@@ -11656,6 +11697,8 @@ EOF
 # Tools JSON cache (optimization #2: avoid rebuilding every API call)
 TOOLS_JSON_CACHE=""
 TOOLS_CACHE_EPOCH=0
+# System prompt JSON cache — invalidated when BASHAGT.md or skills change
+SYS_JSON_CACHE=""
 
 invalidate_tools_cache() {
     TOOLS_JSON_CACHE=""
@@ -13363,7 +13406,10 @@ run_turn() {
         --argjson active_todos "$(_count_active_todos)" \
         --arg goal "${user_input%%$'\n'*}" \
         '{context:{used:$ctx_used,limit:$ctx_limit,pct:$ctx_pct},turn:{current:$turn,non_productive_streak:$streak},todos:{active:$active_todos},goal:$goal}')
-    _hook_results=$(_hook_fire "pre_turn" "$_hook_ctx")
+    _hook_results_file=$(_mktemp_file "/tmp/bashagt_hook_result.XXXXXX")
+    _hook_fire "pre_turn" "$_hook_ctx" "$_hook_results_file"
+    _hook_results=$(<"$_hook_results_file")
+    rm -f "$_hook_results_file"
     if [[ "$_hook_results" != "[]" && -n "$_hook_results" ]]; then
         while IFS= read -r _hook_item; do
             [[ -z "$_hook_item" ]] && continue
