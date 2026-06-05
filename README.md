@@ -6,8 +6,8 @@
 
 [![Bash](https://img.shields.io/badge/bash-4.0%2B-green?logo=gnubash)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL%20%7C%20Termux%20%7C%20iSH-blue)]()
-[![Lines](https://img.shields.io/badge/lines-15,974-orange)]()
-[![Functions](https://img.shields.io/badge/functions-446-purple)]()
+[![Lines](https://img.shields.io/badge/lines-16,075-orange)]()
+[![Functions](https://img.shields.io/badge/functions-449-purple)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 [![Status](https://img.shields.io/badge/status-preview-yellow)]()
 
@@ -67,7 +67,7 @@ bash is the common denominator of the Unix world. It doesn't care about hardware
 
 Bashagt is the answer.
 
-It is a **15,974-line pure bash script**. No Node. No Python. No pip. No npm. No runtime dependency you've ever heard of.
+It is a **16,075-line pure bash script**. No Node. No Python. No pip. No npm. No runtime dependency you've ever heard of.
 
 Its entire arsenal consists of three things — three things that are everywhere on any Unix-like system:
 
@@ -113,8 +113,8 @@ Maybe when this vision becomes reality, people will look back at "you need Node 
 
 ## ✨ Features
 
-- 🐚 **Pure Bash** — 15,974 lines, 446 functions, zero Node/Python runtime dependencies
-- ⚡ **Zero-Fork Hot Path** — incremental message assembly, hash-driven context/skill caches, pure-bash request body construction; minimizes subshell overhead on every turn
+- 🐚 **Pure Bash** — 16,075 lines, 449 functions, zero Node/Python runtime dependencies
+- ⚡ **Zero-Fork Hot Path** — incremental message assembly, hash-driven caches, pure-bash request body, persistent cross-turn renderer; minimizes per-turn subshell overhead
 - 🖥️ **Cross-Platform** — Linux (GNU), macOS (BSD), WSL, Termux (Android), iSH (iPhone/iPad)
 - 🔧 **24 Built-in Tools** — file read/write/edit/delete, command execution, web search, sub-agent delegation, TODO management, skill system…
 - 🤖 **Sub-Agent System** — 11 system agents (plan/explore/review/summarize…) + customizable project agents

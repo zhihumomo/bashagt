@@ -6,8 +6,8 @@
 
 [![Bash](https://img.shields.io/badge/bash-4.0%2B-green?logo=gnubash)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL%20%7C%20Termux%20%7C%20iSH-blue)]()
-[![Lines](https://img.shields.io/badge/lines-15,974-orange)]()
-[![Functions](https://img.shields.io/badge/functions-446-purple)]()
+[![Lines](https://img.shields.io/badge/lines-16,075-orange)]()
+[![Functions](https://img.shields.io/badge/functions-449-purple)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 [![Status](https://img.shields.io/badge/status-preview-yellow)]()
 
@@ -67,7 +67,7 @@ bash 是 Unix 世界的公分母。它不挑硬件，不挑发行版，不挑内
 
 Bashagt 就是这个问题的答案。
 
-它是一个 **15974 行纯 bash 脚本**。没有 Node。没有 Python。没有 pip。没有 npm。没有任何你叫得上名字的运行时依赖。
+它是一个 **16075 行纯 bash 脚本**。没有 Node。没有 Python。没有 pip。没有 npm。没有任何你叫得上名字的运行时依赖。
 
 它的全部身家就是三个东西——三样在任何类 Unix 系统上都唾手可得的东西：
 
@@ -113,8 +113,8 @@ Bashagt 只是一颗种子。但它指向的方向很简单：
 
 ## ✨ 特性
 
-- 🐚 **纯 Bash 实现** — 15,974 行代码，446 个函数，无 Node/Python 运行时依赖
-- ⚡ **零 Fork 热路径** — 增量消息拼接、哈希驱动的上下文/技能缓存、纯 bash 请求体构建；最小化每轮 subshell 开销
+- 🐚 **纯 Bash 实现** — 16,075 行代码，449 个函数，无 Node/Python 运行时依赖
+- ⚡ **零 Fork 热路径** — 增量消息拼接、哈希驱动缓存、纯 bash 请求体、跨回合持久化渲染器；最小化每轮 subshell 开销
 - 🖥️ **全平台覆盖** — Linux (GNU)、macOS (BSD)、WSL、Termux (Android)、iSH (iPhone/iPad)
 - 🔧 **24 个内置工具** — 文件读写编辑删除、命令执行、网页搜索、子智能体调用、TODO 管理、技能系统……
 - 🤖 **子智能体系统** — 11 个系统智能体（plan/explore/review/summarize……）+ 可自定义项目智能体
