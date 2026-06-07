@@ -10377,7 +10377,7 @@ _plan_state() {
 # ── Plan auto TODO: non-interactive TODO creation from plan steps ──
 # Extracted from plan_to_todos() logic, no interactive prompts.
 _plan_auto_todo() {
-    local _steps_raw="$1" _target="${2:-$PWD}"
+    local _steps_raw="$1" _target="${2:-$PWD}" _plan_id="${3:-}"
     local _date _id _desc_json _tmp_items _new_items _pi _plan_created _count
     _date=$(date +%Y-%m-%d)
     _pi=0
@@ -10386,8 +10386,15 @@ _plan_auto_todo() {
     if [[ -z "$_tmp_items" ]] || [[ ! -f "$_tmp_items" ]]; then
         log "WARN: mktemp failed for plan TODOs, falling back to individual saves"
         while IFS= read -r -d '' _step; do
-            todo_add "$_step" "" "plan" > /dev/null
             _pi=$((_pi + 1))
+            _id="todo_$(_timestamp_ms)${RANDOM}_${_pi}"
+            _desc_json=$(printf '%s' "" | jq -Rs '.')
+            _new_json=$(jq -n --arg id "$_id" --arg subject "$_step" \
+                --argjson desc "$_desc_json" --arg pid "$_plan_id" \
+                --arg date "$_date" \
+                '[{id:$id,subject:$subject,description:$desc,status:"pending",source:"plan",created:$date,completed:"",plan_id:$pid}]')
+            TODOS=$(echo "$TODOS" | jq ". + $_new_json")
+            save_todos
             _plan_created+=$(printf '  %s%d.%s %s' "$GREEN" "$_pi" "$RESET" "$_step")$'\n'
         done < <(printf '%s' "$_steps_raw" | jq -j '.[] + "\u0000"' 2>/dev/null)
         _count=$_pi
@@ -10404,8 +10411,8 @@ _plan_auto_todo() {
         _pi=$((_pi + 1))
         _id="todo_$(_timestamp_ms)${RANDOM}_${_pi}"
         jq -n --arg id "$_id" --arg subject "$_step" \
-            --arg date "$_date" \
-            '{id:$id,subject:$subject,description:"",status:"pending",source:"plan",created:$date,completed:""}' \
+            --arg date "$_date" --arg pid "$_plan_id" \
+            '{id:$id,subject:$subject,description:"",status:"pending",source:"plan",created:$date,completed:"",plan_id:$pid}' \
             >> "$_tmp_items"
     done < <(printf '%s' "$_steps_raw" | jq -j '.[] + "\u0000"' 2>/dev/null)
     _new_items=$(jq -s '.' "$_tmp_items")
@@ -10422,7 +10429,8 @@ _plan_auto_todo() {
     _count=$_pi
     # Auto-start first pending plan-sourced TODO (must precede _feedback build)
     local _first_id
-    _first_id=$(echo "$TODOS" | jq -r '[.[] | select(.source=="plan" and .status=="pending")] | sort_by(.created) | .[0].id // empty' 2>/dev/null)
+    _first_id=$(echo "$TODOS" | jq -r --arg pid "$_plan_id" \
+        '[.[] | select(.source=="plan" and .plan_id==$pid and .status=="pending")] | sort_by(.created) | .[0].id // empty' 2>/dev/null)
     if [[ -n "$_first_id" ]]; then
         todo_update "$_first_id" "in_progress" > /dev/null || true
     fi
@@ -10604,8 +10612,9 @@ plan_to_todos() {
 # Runs plan_extract_steps → _plan_auto_todo pipeline.
 tool_make_todos() {
     local plan_text="$1" desc="${2:-}"
-    local _steps_raw _count _target
+    local _steps_raw _count _target _plan_id
     _target="${BASHAGT_PROJECT_DIR:-$PWD}"
+    _plan_id="plan_$(_timestamp_ms)"
 
     [[ -z "$plan_text" ]] && { printf 'Error: plan_text required for make_todos\n'; return 1; }
 
@@ -10633,7 +10642,7 @@ tool_make_todos() {
 
     # Create TODOs
     local _full_output
-    _full_output=$(_plan_auto_todo "$_steps_raw" "$_target" 2>/dev/null) || true
+    _full_output=$(_plan_auto_todo "$_steps_raw" "$_target" "$_plan_id" 2>/dev/null) || true
     # Last line = count, preceding lines = feedback text
     _count=$(printf '%s\n' "$_full_output" | tail -1)
     _count=${_count:-0}
@@ -10686,7 +10695,9 @@ tool_task_update() {
             _st_subj=$(echo "$TODOS" | jq -r --arg id "$id" '.[] | select(.id==$id) | .subject' 2>/dev/null)
             if [[ "$_st_src" == "plan" ]]; then
                 _st_num=$(echo "$TODOS" | jq -r --arg id "$id" '
-                  [.[] | select(.source=="plan")] | sort_by(.created) |
+                  [.[] | select(.source=="plan" and (.plan_id // "") == (
+                    [.[] | select(.id==$id)] | .[0].plan_id // ""
+                  ))] | sort_by(.created) |
                   to_entries | .[] | select(.value.id==$id) | (.key + 1)' 2>/dev/null)
                 if [[ -n "$_st_num" && "$_st_num" != "null" ]]; then
                     _STEP_BANNER="$(ui_label "⚑ Step $_st_num" pink) · $_st_subj"
@@ -13650,7 +13661,10 @@ _turn_flush_assistant() {
         _DEFERRED_CONTENT_JSON=""
     fi
     if [[ -n "${_PLAN_DEFERRED_MSG:-}" ]]; then
-        msg_add_user_text "$_PLAN_DEFERRED_MSG"
+        local _pjson; _pjson=$(jq -nc --arg text "$_PLAN_DEFERRED_MSG" '{type:"text","text":$text}')
+        MESSAGES=$(jq -c --argjson block "$_pjson" \
+            '.[-1].content += [$block]' <<< "$MESSAGES")
+        _cc_invalidate msgs
         _PLAN_DEFERRED_MSG=""
     fi
     if (( ${_PLAN_STOP:-0} )); then
