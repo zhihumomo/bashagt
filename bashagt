@@ -13669,16 +13669,19 @@ _turn_flush_feedback() {
 # Must be called AFTER tool_results are added (preserving tool_use/tool_result pairing).
 # Returns 1 if _PLAN_STOP was set (caller should end the turn).
 _turn_flush_assistant() {
-    if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
-        msg_add_assistant "$_DEFERRED_CONTENT_JSON"
-        _DEFERRED_CONTENT_JSON=""
-    fi
+    # Flush plan deferred message BEFORE assistant content so it appends to
+    # the previous user message, not the assistant message. Prevents text
+    # block being inserted after tool_use blocks (API rejects that ordering).
     if [[ -n "${_PLAN_DEFERRED_MSG:-}" ]]; then
         local _pjson; _pjson=$(jq -nc --arg text "$_PLAN_DEFERRED_MSG" '{type:"text","text":$text}')
         MESSAGES=$(jq -c --argjson block "$_pjson" \
             '.[-1].content += [$block]' <<< "$MESSAGES")
         _cc_invalidate msgs
         _PLAN_DEFERRED_MSG=""
+    fi
+    if [[ -n "${_DEFERRED_CONTENT_JSON:-}" ]]; then
+        msg_add_assistant "$_DEFERRED_CONTENT_JSON"
+        _DEFERRED_CONTENT_JSON=""
     fi
     if (( ${_PLAN_STOP:-0} )); then
         _PLAN_STOP=0
