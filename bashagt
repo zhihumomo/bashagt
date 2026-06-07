@@ -13193,7 +13193,8 @@ ESTIMATED_CONTEXT_TOKENS=0
 # Each handler receives the full trimmed input as $1.
 # /plan with arg sets _SLASH_FALLTHROUGH=1 to continue into the agent loop.
 _slash_plan() {
-    local trimmed="$1" plan_task="${trimmed#/plan }"
+    local trimmed="$1"
+    local plan_task="${trimmed#/plan }"
     [[ "$plan_task" == "$trimmed" ]] && plan_task=""
     if [[ -n "$plan_task" ]]; then
         user_input="Call agent(\"plan\", \"design a plan for: $plan_task\")"
@@ -13225,7 +13226,8 @@ _slash_save() {
 _slash_load() { load_history; }
 _slash_compress() { compress_context; save_history; }
 _slash_model() {
-    local trimmed="$1" _new_profile="${trimmed#/model }"
+    local trimmed="$1"
+    local _new_profile="${trimmed#/model }"
     if [[ "$_new_profile" == "$trimmed" ]] || [[ -z "$_new_profile" ]]; then
         local _mout="  ${BOLD}Profile:${RESET} $(_prof_get_field name) → $(_prof_get_field model)"$'\n'
         _mout+="  ${BOLD}Endpoint:${RESET} $(_prof_get_field api_url)"$'\n'
@@ -13300,11 +13302,13 @@ _slash_skills() {
     _stream_emit "text" "$(jq -nc --arg c "$_out" '{content: $c}')"
 }
 _slash_skill() {
-    local trimmed="$1" sname="${trimmed#/skill }"
+    local trimmed="$1"
+    local sname="${trimmed#/skill }"
     activate_skill "$sname"
 }
 _slash_skill_off() {
-    local trimmed="$1" sname="${trimmed#/skill-off }"
+    local trimmed="$1"
+    local sname="${trimmed#/skill-off }"
     deactivate_skill "$sname"
 }
 _slash_memory() {
@@ -13346,7 +13350,8 @@ _slash_memory() {
     _stream_emit "text" "$(jq -nc --arg c "$_mem_out" '{content: $c}')"
 }
 _slash_remember() {
-    local trimmed="$1" mem_text="${trimmed#/remember }"
+    local trimmed="$1"
+    local mem_text="${trimmed#/remember }"
     if [[ "$mem_text" == "$trimmed" ]] || [[ -z "$mem_text" ]]; then
         _stream_emit "text" "$(jq -nc --arg c '  Usage: /remember <text to remember>' '{content: $c}')"
         return
@@ -13366,12 +13371,14 @@ Text: $mem_text" 2>/dev/null | grep -oE 'engram_[0-9]{2}' || echo "")
 }
 _slash_tasks() { list_tasks; }
 _slash_task_cancel() {
-    local trimmed="$1" tid="${trimmed#/task-cancel }"
+    local trimmed="$1"
+    local tid="${trimmed#/task-cancel }"
     task_cancel "$tid"
 }
 _slash_todo() { todo_list; }
 _slash_todo_add() {
-    local trimmed="$1" tsubject="${trimmed#/todo-add }"
+    local trimmed="$1"
+    local tsubject="${trimmed#/todo-add }"
     if [[ "$tsubject" == "$trimmed" ]] || [[ -z "$tsubject" ]]; then
         _stream_emit "text" "$(jq -nc --arg c '  Usage: /todo-add <task title>' '{content: $c}')"
         return
@@ -13380,7 +13387,8 @@ _slash_todo_add() {
     _stream_emit "text" "$(jq -nc --arg c "$(ui_label '✓' green) Task added: [$(echo "$TODOS" | jq 'length')] $tsubject" '{content: $c}')"
 }
 _slash_todo_done() {
-    local trimmed="$1" targ="${trimmed#/todo-done }"
+    local trimmed="$1"
+    local targ="${trimmed#/todo-done }"
     if [[ "$targ" == "$trimmed" ]] || [[ -z "$targ" ]]; then
         _stream_emit "text" "$(jq -nc --arg c '  Usage: /todo-done <id or index>' '{content: $c}')"
         return
@@ -13399,7 +13407,8 @@ _slash_todo_done() {
     fi
 }
 _slash_todo_fail() {
-    local trimmed="$1" targ="${trimmed#/todo-fail }"
+    local trimmed="$1"
+    local targ="${trimmed#/todo-fail }"
     if [[ "$targ" == "$trimmed" ]] || [[ -z "$targ" ]]; then
         _stream_emit "text" "$(jq -nc --arg c '  Usage: /todo-fail <id or index>' '{content: $c}')"
         return
@@ -13418,7 +13427,8 @@ _slash_todo_fail() {
     fi
 }
 _slash_todo_start() {
-    local trimmed="$1" targ="${trimmed#/todo-start }"
+    local trimmed="$1"
+    local targ="${trimmed#/todo-start }"
     if [[ "$targ" == "$trimmed" ]] || [[ -z "$targ" ]]; then
         _stream_emit "text" "$(jq -nc --arg c '  Usage: /todo-start <id or index>' '{content: $c}')"
         return
@@ -13437,7 +13447,8 @@ _slash_todo_start() {
     fi
 }
 _slash_todo_delete() {
-    local trimmed="$1" targ="${trimmed#/todo-delete }"
+    local trimmed="$1"
+    local targ="${trimmed#/todo-delete }"
     if [[ "$targ" == "$trimmed" ]] || [[ -z "$targ" ]]; then
         _stream_emit "text" "$(jq -nc --arg c '  Usage: /todo-delete <id or index>' '{content: $c}')"
         return
@@ -13456,7 +13467,8 @@ _slash_todo_delete() {
     fi
 }
 _slash_todo_edit() {
-    local trimmed="$1" targ="${trimmed#/todo-edit }"
+    local trimmed="$1"
+    local targ="${trimmed#/todo-edit }"
     if [[ "$targ" == "$trimmed" ]] || [[ -z "$targ" ]]; then
         _stream_emit "text" "$(jq -nc --arg c '  Usage: /todo-edit <id or index> <new title>' '{content: $c}')"
         return
@@ -13481,7 +13493,8 @@ _slash_todo_edit() {
     fi
 }
 _slash_mcp() {
-    local trimmed="$1" _mcp_cmd="${trimmed#/mcp }"
+    local trimmed="$1"
+    local _mcp_cmd="${trimmed#/mcp }"
     if [[ "$_mcp_cmd" == "$trimmed" ]]; then
         cmd_mcp_status
     else
