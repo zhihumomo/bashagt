@@ -10695,9 +10695,9 @@ tool_task_update() {
             _st_subj=$(echo "$TODOS" | jq -r --arg id "$id" '.[] | select(.id==$id) | .subject' 2>/dev/null)
             if [[ "$_st_src" == "plan" ]]; then
                 _st_num=$(echo "$TODOS" | jq -r --arg id "$id" '
-                  [.[] | select(.source=="plan" and (.plan_id // "") == (
-                    [.[] | select(.id==$id)] | .[0].plan_id // ""
-                  ))] | sort_by(.created) |
+                  ([.[] | select(.id==$id) | .plan_id // ""] | .[0]) as $target_pid |
+                  [.[] | select(.source=="plan" and (.plan_id // "") == $target_pid)] |
+                  sort_by(.created) |
                   to_entries | .[] | select(.value.id==$id) | (.key + 1)' 2>/dev/null)
                 if [[ -n "$_st_num" && "$_st_num" != "null" ]]; then
                     _STEP_BANNER="$(ui_label "⚑ Step $_st_num" pink) · $_st_subj"
