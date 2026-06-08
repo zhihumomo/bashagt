@@ -482,7 +482,6 @@ DEFAULT_TRACE_SNAPSHOT_INTERVAL="50"
 DEFAULT_TRACE_PRUNE_KEEP="200"
 DEFAULT_CONTEXT_WINDOW="1048576"
 DEFAULT_CONTEXT_SAFE_RATIO="75"
-DEFAULT_STUCK_THRESHOLD="3"
 DEFAULT_TODO_ENABLED="true"
 DEFAULT_TODO_MAX_CONTEXT="15"
 DEFAULT_MCP_ENABLED="true"
@@ -1456,6 +1455,8 @@ _stream_render() {
                     wait "$_R_SPIN_TIMER_PID" 2>/dev/null || true
                 fi
                 _R_SPIN_TIMER_PID=""
+                rm -f "${_R_SPIN_DESC_FILE:-}" 2>/dev/null
+                _R_SPIN_DESC_FILE=""
                 local _ts=""
                 if [[ "${_itok:-0}" -gt 0 || "${_otok:-0}" -gt 0 ]]; then
                     _itok_fmt="$_itok"; _otok_fmt="$_otok"
@@ -1474,6 +1475,10 @@ _stream_render() {
                     _R_SPIN_ICON="${_icon:-●}"
                     _R_SPIN_DESC="${_desc:-}"
                     _R_SPIN_START_TS=$(_timestamp_ms)
+                    # Timer runs in bg subshell → can't see desc updates. Use a
+                    # temp file so the timer re-reads the latest desc each frame.
+                    _R_SPIN_DESC_FILE="$(_mktemp_file /tmp/bashagt_spin_desc.XXXXXX)"
+                    printf '%s' "${_R_SPIN_DESC:-}" > "$_R_SPIN_DESC_FILE" 2>/dev/null
                     if [[ "${_icon:-}" == *"●"* ]]; then
                         _R_SPIN_USE_DOT=1
                     else
@@ -1495,8 +1500,15 @@ _stream_render() {
                             fi
                             _ui_time $_r_elapsed 2>/dev/null || true
                             _r_st+=" (${_UI_TIME:-0s})"
-                            if [[ -n "${_R_SPIN_DESC:-}" ]]; then
+                            # Re-read desc from file so status_update can update it live
+                            if [[ -n "${_R_SPIN_DESC_FILE:-}" && -f "$_R_SPIN_DESC_FILE" ]]; then
+                                _r_d=$(cat "$_R_SPIN_DESC_FILE" 2>/dev/null)
+                            elif [[ -n "${_R_SPIN_DESC:-}" ]]; then
                                 _r_d="${_R_SPIN_DESC}"
+                            else
+                                _r_d=""
+                            fi
+                            if [[ -n "$_r_d" ]]; then
                                 _r_tw="${COLUMNS:-80}"
                                 _r_maxd=$(( _r_tw - ${#_r_st} - 4 ))
                                 (( _r_maxd < 10 )) && _r_maxd=10
@@ -1514,7 +1526,8 @@ _stream_render() {
                 fi
                 # /dev/tty bypasses stdio buffering (char device → immediate write()).
                 if [[ "${_R_SPIN_USE_DOT:-0}" == "1" && -n "${_R_SPIN_TIMER_PID:-}" ]]; then
-                    :  # dot mode: timer owns the line exclusively, no renderer write
+                    # Update desc file so timer picks up new count next frame
+                    [[ -n "${_R_SPIN_DESC_FILE:-}" ]] && printf '%s' "${_desc:-}" > "$_R_SPIN_DESC_FILE" 2>/dev/null
                 elif [[ -w /dev/tty ]]; then
                     local _st_line _d _tw _maxd
                     _st_line="  ${_icon} ${_label} (${_ela})"
@@ -3072,7 +3085,7 @@ _init_settings_template() {
   "turn_budget_soft": 96000,
   "turn_budget_hard": 128000,
   "compress_threshold": 250000,
-  "stuck_threshold": 3,
+
 
   "__________________": "── Network & Proxy ──",
   "connect_timeout": 10,
@@ -5321,7 +5334,7 @@ load_config() {
         "declare -g _CFG_turn_budget_soft=\($c.turn_budget_soft // "" | sh)",
         "declare -g _CFG_turn_budget_hard=\($c.turn_budget_hard // "" | sh)",
         "declare -g _CFG_compress_threshold=\($c.compress_threshold // "" | sh)",
-        "declare -g _CFG_stuck_threshold=\($c.stuck_threshold // "" | sh)",
+
         "declare -g _CFG_connect_timeout=\($c.connect_timeout // "" | sh)",
         "declare -g _CFG_cmd_timeout=\($c.cmd_timeout // "" | sh)",
         "declare -g _CFG_web_search_engine=\($c.web_search_engine // "" | sh)",
@@ -5402,7 +5415,7 @@ load_config() {
     BASHAGT_TURN_BUDGET_HARD=$(_get_setting "turn_budget_hard" "BASHAGT_TURN_BUDGET_HARD" "$DEFAULT_TURN_BUDGET_HARD")
     BASHAGT_CONTEXT_WINDOW=$(_get_setting "context_window" "BASHAGT_CONTEXT_WINDOW" "$DEFAULT_CONTEXT_WINDOW")
     BASHAGT_CONTEXT_SAFE_RATIO=$(_get_setting "context_safe_ratio" "BASHAGT_CONTEXT_SAFE_RATIO" "$DEFAULT_CONTEXT_SAFE_RATIO")
-    BASHAGT_STUCK_THRESHOLD=$(_get_setting "stuck_threshold" "BASHAGT_STUCK_THRESHOLD" "$DEFAULT_STUCK_THRESHOLD")
+
     BASHAGT_WEB_SEARCH_ENGINE=$(_get_setting "web_search_engine" "BASHAGT_WEB_SEARCH_ENGINE" "$DEFAULT_WEB_SEARCH_ENGINE")
     BASHAGT_WEB_SEARCH_TIMEOUT=$(_get_setting "web_search_timeout" "BASHAGT_WEB_SEARCH_TIMEOUT" "$DEFAULT_WEB_SEARCH_TIMEOUT")
 
@@ -7801,7 +7814,7 @@ ${AGENTS[$name]}"
         fi
 
         case "$_stop_reason" in
-            end_turn|max_tokens) break ;;
+            end_turn) break ;;
             tool_use) ;;          # fall through → execute tools below
             *) break ;;           # unknown → treat as end_turn
         esac
@@ -13158,7 +13171,6 @@ STOP_REASON='end_turn'
 
 # Turn budget tracking (reset per turn)
 TURN_TOKENS_USED=0
-TURN_MAX_TOKENS_HIT=0
 TURN_PREV_STOP=""
 EFFECTIVE_MAX_TOKENS=""
 ESTIMATED_CONTEXT_TOKENS=0
@@ -13680,7 +13692,6 @@ _turn_init() {
     TURN_TOKENS_USED=0
     TURN_INPUT_ACCUM=0
     TURN_OUTPUT_ACCUM=0
-    TURN_MAX_TOKENS_HIT=0
     TURN_PREV_STOP=""
     EFFECTIVE_MAX_TOKENS=""
     TURN_COUNTER=$((TURN_COUNTER + 1))
@@ -14260,7 +14271,6 @@ run_turn() {
                 accumulate_turn_tokens
                 TURN_PREV_STOP="tool_use"
                 true  # placeholder — consecutive tool rounds removed
-                TURN_MAX_TOKENS_HIT=0  # reset stuck counter
                 # Reload agents after task calls (agent_manager may have created/deleted)
                 [[ "$called_task" == "1" ]] && { load_agents; invalidate_tools_cache; _cc_invalidate system; called_task=0; }
                 # Process scheduled job queue: reap completed, launch queued
@@ -14299,15 +14309,6 @@ Selected: ${_choice:-cancelled}"
                 fi
 
                 :  # text-length reward removed
-                ;;
-
-            max_tokens)
-                accumulate_turn_tokens
-                TURN_PREV_STOP="max_tokens"
-                _turn_flush_assistant
-                if ! handle_max_tokens; then
-                    break  # stuck loop or budget exhausted
-                fi
                 ;;
 
             *)
@@ -14394,9 +14395,6 @@ compute_call_budget() {
     if (( iter == 1 )) || [[ "$prev_stop" == "" ]] || [[ "$prev_stop" == "end_turn" ]]; then
         # Full budget: first call, auto-continue, or text-only response
         tier=100
-    elif [[ "$prev_stop" == "max_tokens" ]]; then
-        # Truncated output — aggressive reduction
-        tier=50
     elif [[ "$prev_stop" == "tool_use" ]]; then
         # After tool execution: start at 75%
         tier=75
@@ -14426,40 +14424,6 @@ accumulate_turn_tokens() {
 check_turn_budget() {
     if ! context_window_check; then
         _stream_emit "warning" "$(jq -nc --arg c 'Context window exceeded — turn stopped to prevent data loss.' '{content: $c}')"
-        return 1
-    fi
-    return 0
-}
-
-# Smart max_tokens stop: reduce budget, detect stuck loops
-# Returns: 0 = continue, 1 = force end_turn
-handle_max_tokens() {
-    TURN_MAX_TOKENS_HIT=$(( TURN_MAX_TOKENS_HIT + 1 ))
-    local limit="${BASHAGT_STUCK_THRESHOLD:-$DEFAULT_STUCK_THRESHOLD}"
-
-    _stream_emit "info" "$(jq -nc --arg c "⚠ Response truncated (max_tokens #$TURN_MAX_TOKENS_HIT/$limit), retrying..." '{content: $c}')"
-
-    if (( TURN_MAX_TOKENS_HIT >= limit )); then
-        # ── on_stuck hook — stuck intervention ──
-        local _stuck_ctx; _stuck_ctx=$(jq -nc \
-            --argjson count "$TURN_MAX_TOKENS_HIT" \
-            --argjson turn "${_round:-0}" \
-            --argjson ctx_pct "$(( ESTIMATED_CONTEXT_TOKENS * 100 / BASHAGT_CONTEXT_WINDOW ))" \
-            '{consecutive_max_tokens:$count,turn:$turn,context_pct:$ctx_pct}')
-        local _stuck_results; _stuck_results=$(_hook_fire "on_stuck" "$_stuck_ctx")
-        if [[ "$_stuck_results" != "[]" && -n "$_stuck_results" ]]; then
-            local _stuck_item
-            while IFS= read -r _stuck_item; do
-                [[ -z "$_stuck_item" ]] && continue
-                local _inj; _inj=$(jq -r '.inject // false' <<< "$_stuck_item" 2>/dev/null)
-                if [[ "$_inj" == "true" ]]; then
-                    local _sc; _sc=$(jq -r '.content // ""' <<< "$_stuck_item" 2>/dev/null)
-                    [[ -n "$_sc" ]] && msg_add_user_text "$_sc"
-                fi
-            done < <(jq -c '.[]' <<< "$_stuck_results" 2>/dev/null)
-        fi
-        _stream_emit "error" "$(jq -nc --arg c "⚠ Stuck loop: $TURN_MAX_TOKENS_HIT consecutive max_tokens. Stopping." '{content: $c}')"
-        save_history
         return 1
     fi
     return 0
