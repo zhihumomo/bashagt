@@ -14196,13 +14196,6 @@ run_turn() {
                         is_error="true"
                     fi
 
-                    # Truncate large tool outputs (50K for 1M context)
-                    local max_output=50000
-                    if (( ${#tool_output} > max_output )); then
-                        tool_output="${tool_output:0:$max_output}"
-                        tool_output+=$'\n[output truncated at 50000 bytes]'
-                    fi
-
                     local result
                     result=$(format_tool_result "$tool_id" "$tool_output" "$is_error")
                     results_json=$(echo "$results_json" | jq --argjson r "$result" '. + [$r]')
