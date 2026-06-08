@@ -1422,7 +1422,6 @@ _stream_render() {
     local _type
     _type="${_line#\{\"type\":\"}"
     _type="${_type%%\"*}"
-    log "DEBUG: [RENDER] recv type=$_type ts=$(_timestamp_ms)"
     [[ -z "$_type" ]] && { printf '%s\n' "$_line"; return 0; }
 
     case "$_type" in
@@ -1547,7 +1546,6 @@ _stream_render() {
                 IFS= read -r _TOOL_NAME
                 IFS= read -r _TOOL_DESC
             } <<< "$(jq -r '(.name // ""), (.desc // "")' <<< "$_line" 2>/dev/null)" || true
-            log "DEBUG: [RENDER] tool_start name=[$_TOOL_NAME] desc_len=${#_TOOL_DESC} ts=$(_timestamp_ms)"
             if _detect_termux; then
                 :  # Termux: defer rendering to tool_tick (CUU unavailable)
             else
@@ -1557,14 +1555,13 @@ _stream_render() {
             fi ;;
         tool_end)
             log "DEBUG: [RENDER] tool_end _TOOL_NAME=[${_TOOL_NAME:-}] _TOOL_DESC=[${_TOOL_DESC:-}] frame_name=$(jq -r '.name // "?"' <<< "$_line" 2>/dev/null)"
-            [[ -z "$_TOOL_NAME" ]] && { log "DEBUG: [RENDER] tool_end SKIPPED — _TOOL_NAME empty"; return 0; }
+            [[ -z "$_TOOL_NAME" ]] && return 0
             local _ela; _ela=$(jq -r '.elapsed_str // ""' <<< "$_line" 2>/dev/null)
             if _detect_termux; then
                 printf '\r\033[K\n' >/dev/tty
             else
                 printf '\033[?25l\033[1A\r\033[K\033[?25h'
             fi
-            log "DEBUG: [RENDER] tool_end EXECUTED cursor-up for [$_TOOL_NAME]"
             _TOOL_NAME="" _TOOL_DESC="" ;;
         tool_tick)
             local _ela; _ela=$(jq -r '.elapsed_str // ""' <<< "$_line" 2>/dev/null)
@@ -1587,10 +1584,8 @@ _stream_render() {
             fi ;;
         tree)
             local _entries; _entries=$(jq -c '.entries // []' <<< "$_line" 2>/dev/null)
-            local _tr_total; _tr_total=$(jq 'length' <<< "$_entries" 2>/dev/null || echo 0)
-            log "DEBUG: [RENDER] tree begin count=$_tr_total ts=$(_timestamp_ms)"
             if [[ -n "$_entries" && "$_entries" != "[]" ]]; then
-                local _idx=0 _total; _total=$_tr_total
+                local _idx=0 _total; _total=$(jq 'length' <<< "$_entries")
                 while IFS= read -r _entry; do
                     [[ -z "$_entry" ]] && continue
                     _idx=$((_idx + 1))
@@ -1601,7 +1596,6 @@ _stream_render() {
                     } <<< "$(jq -r '(.name // "?"), (.elapsed_str // "")' <<< "$_entry" 2>/dev/null)" || true
                     _td=$(jq -r '.desc // ""' <<< "$_entry")
                     if (( _idx == _total )); then _branch="└"; else _branch="├"; fi
-                    log "DEBUG: [RENDER] tree entry idx=$_idx total=$_total name=$_tn branch=$_branch ts=$(_timestamp_ms)"
                     printf '    %s%s%s %s (%s%s%s)' \
                         "$LIGHT_YELLOW" "$_branch" "$RESET" \
                         "$_tn" \
@@ -8143,15 +8137,9 @@ tool_agent_batch() {
 
     [[ $task_count -eq 0 ]] && { printf 'agent_batch: tasks array is empty\n'; return 1; }
 
-    # ---- Detect streaming fd (bypass dispatch_tool stdout redirect) ----
-    local _stm_fd=${_BYPASS_FD:-1}
-    local _diag_ts; _diag_ts=$(_timestamp_ms)
-    printf '[%s] DIAG: _stm_fd=%d fd8_live=%s workers=%s\n' \
-        "$_diag_ts" "$_stm_fd" \
-        "$([[ -e /proc/self/fd/8 ]] && echo yes || echo no)" \
-        "$(jobs -r 2>/dev/null | wc -l)" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
     # ---- Phase 1: validate + submit all tasks ----
     local _BATCH_IDS=() _BATCH_AGENTS=() _BATCH_DESCS=()
+    local _stm_fd=${_BYPASS_FD:-1}
     local i agent_name prompt jid _desc
     for (( i=0; i<task_count; i++ )); do
         agent_name=$(jq -r ".tasks[$i].agent" <<< "$input_json")
@@ -8175,11 +8163,6 @@ tool_agent_batch() {
         _BATCH_AGENTS+=("$agent_name")
         _BATCH_DESCS+=("$_desc")
     done
-    # agent_submit already triggered _agent_sched_tick — workers are forked
-    _diag_ts=$(_timestamp_ms)
-    printf '[%s] DIAG: phase1_done total=%d workers=%s\n' \
-        "$_diag_ts" "${#_BATCH_IDS[@]}" \
-        "$(jobs -r 2>/dev/null | wc -l)" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
 
     # ---- Phase 2: emit tree + spinner ----
     local _total=${#_BATCH_IDS[@]}
@@ -8190,28 +8173,21 @@ tool_agent_batch() {
         else
             _branch='├'
         fi
-        _diag_ts=$(_timestamp_ms)
-        printf '[%s] DIAG: tree_before idx=%d/%d\n' "$_diag_ts" "$_idx" "$_total" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
         _stream_emit "info" "$(jq -nc \
             --arg c "  ${_branch} ${_BATCH_AGENTS[$_idx]} · ${_BATCH_DESCS[$_idx]}" \
             '{content: $c}')" >&$_stm_fd
-        printf '[%s] DIAG: tree_after  idx=%d/%d\n' "$(_timestamp_ms)" "$_idx" "$_total" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
     done
 
     local _start_ts=$(_timestamp_ms) _tick_count=0
 
     _dot_tick
-    _diag_ts=$(_timestamp_ms)
-    printf '[%s] DIAG: status_begin_before fd=%d\n' "$_diag_ts" "$_stm_fd" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
     _stream_emit "status_begin" "$(jq -nc \
         --arg icon "$_DOT_FRAME" --arg label "agent_batch" \
         --arg ela "0s" --arg desc "${_total} tasks, 0/${_total} done, ${_total} running" \
         '{icon: $icon, label: $label, elapsed_str: $ela, desc: $desc}')" >&$_stm_fd
-    printf '[%s] DIAG: status_begin_after\n' "$(_timestamp_ms)" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
 
     # ---- Phase 3: poll loop with status updates ----
     local _pending=true _done_count=0 _failed_count=0 _running st
-    local _diag_poll_count=0
     while [[ $_pending == true ]]; do
         [[ "${_bagt_interrupted:-0}" == "1" ]] && { _pending=false; break; }
         _pending=false
@@ -8227,7 +8203,11 @@ tool_agent_batch() {
         done
 
         _tick_count=$((_tick_count + 1))
-        _diag_poll_count=$((_diag_poll_count + 1))
+        # Reap crashed workers every 50 polls (~5s) so a worker that dies without
+        # updating its job JSON (OOM, segfault) is detected and doesn't hang forever.
+        if (( _tick_count % 50 == 0 )); then
+            _agent_sched_reap
+        fi
         if (( _tick_count % 5 == 0 )); then
             _dot_tick
             local _elapsed; _elapsed=$(( $(_timestamp_ms) - _start_ts ))
@@ -8237,14 +8217,10 @@ tool_agent_batch() {
             else
                 _desc="${_done_count}/${_total} done, ${_running} running"
             fi
-            _diag_ts=$(_timestamp_ms)
-            printf '[%s] DIAG: status_update_before poll#=%d done=%d failed=%d running=%d\n' \
-                "$_diag_ts" "$_diag_poll_count" "$_done_count" "$_failed_count" "$_running" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
             _stream_emit "status_update" "$(jq -nc \
                 --arg icon "$_DOT_FRAME" --arg label "agent_batch" \
                 --arg ela "$(ui_time $_elapsed)" --arg desc "$_desc" \
                 '{icon: $icon, label: $label, elapsed_str: $ela, desc: $desc}')" >&$_stm_fd
-            printf '[%s] DIAG: status_update_after\n' "$(_timestamp_ms)" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
         fi
 
         [[ $_pending == true ]] && { _spin_sleep 0.1 || _pending=false; }
@@ -8282,23 +8258,16 @@ tool_agent_batch() {
     # NOTE: do NOT clear _bagt_interrupted — let run_turn see it
     # ---- Phase 4: status_done ----
     local _final_elapsed; _final_elapsed=$(( $(_timestamp_ms) - _start_ts ))
-    _diag_ts=$(_timestamp_ms)
-    printf '[%s] DIAG: status_done_before poll_total=%d\n' "$_diag_ts" "$_diag_poll_count" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
     _stream_emit "status_done" "$(jq -nc \
         --arg label "agent_batch-done" --arg ela "$(ui_time $_final_elapsed)" \
         --arg desc "${_total} tasks" \
         '{label: $label, elapsed_str: $ela, desc: $desc}')" >&$_stm_fd
-    printf '[%s] DIAG: status_done_after\n' "$(_timestamp_ms)" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
 
 
     # ---- Phase 5: collect results (plain output, no banners) ----
     for (( _idx=0; _idx<_total; _idx++ )); do
-        _diag_ts=$(_timestamp_ms)
-        printf '[%s] DIAG: result_before idx=%d/%d\n' "$_diag_ts" "$_idx" "$_total" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
         agent_result "${_BATCH_IDS[$_idx]}" 2>/dev/null
-        printf '[%s] DIAG: result_after  idx=%d/%d\n' "$(_timestamp_ms)" "$_idx" "$_total" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
     done
-    printf '[%s] DIAG: all_done\n' "$(_timestamp_ms)" >> "${TMPDIR:-/tmp}/bashagt_diag.log"
     return 0
 }
 
@@ -14113,7 +14082,6 @@ run_turn() {
                                         _stream_emit "text" "$(jq -nc --arg c '──── End Script ────' '{content: $c}')" || true
                                     fi
                                 fi
-                                log "DEBUG: [TS] tool_start emit name=$tool_name tool_id=$tool_id ts=$(_timestamp_ms)"
                                 _stream_emit "tool_start" "$(jq -nc \
                                    --arg n "$tool_name" --arg id "$tool_id" --arg d "${_tsub_label:-}" \
                                    '{name: $n, id: $id, desc: $d}')" || { local _rc=$?; log "DEBUG: [PIPE] tool_start emit rc=$_rc (FIFO broken?)"; true; }
@@ -14161,8 +14129,7 @@ run_turn() {
                     if (( ! _safe_skip )); then
                         case "$tool_name" in
                             agent|web_search|agent_batch|make_todos|undo|request) ;;
-                            *) log "DEBUG: [TS] tool_end emit name=$tool_name ts=$(_timestamp_ms)"
-                                _stream_emit "tool_end" "$(jq -nc \
+                            *) _stream_emit "tool_end" "$(jq -nc \
                                    --arg n "$tool_name" --arg e "$(ui_time $_ts_elapsed)" --argjson err "$_terr" \
                                    '{name: $n, elapsed_str: $e, error: $err}')" || { local _rc=$?; log "DEBUG: [PIPE] tool_end emit rc=$_rc (FIFO broken?)"; true; } ;;
                         esac
@@ -14263,7 +14230,6 @@ run_turn() {
                                 '{name: $n, elapsed_str: $e, desc: $d}'
                         fi
                     done | jq -s '.')
-                    log "DEBUG: [TS] tree emit count=$_TOOL_TREE_COUNT ts=$(_timestamp_ms)"
                     _stream_emit "tree" "$(jq -nc --argjson entries "$_entries_json" '{entries: $entries}')"
                 fi
 
