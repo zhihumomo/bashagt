@@ -1422,6 +1422,7 @@ _stream_render() {
     local _type
     _type="${_line#\{\"type\":\"}"
     _type="${_type%%\"*}"
+    log "DEBUG: [RENDER] recv type=$_type ts=$(_timestamp_ms)"
     [[ -z "$_type" ]] && { printf '%s\n' "$_line"; return 0; }
 
     case "$_type" in
@@ -1546,6 +1547,7 @@ _stream_render() {
                 IFS= read -r _TOOL_NAME
                 IFS= read -r _TOOL_DESC
             } <<< "$(jq -r '(.name // ""), (.desc // "")' <<< "$_line" 2>/dev/null)" || true
+            log "DEBUG: [RENDER] tool_start name=[$_TOOL_NAME] desc_len=${#_TOOL_DESC} ts=$(_timestamp_ms)"
             if _detect_termux; then
                 :  # Termux: defer rendering to tool_tick (CUU unavailable)
             else
@@ -1555,13 +1557,14 @@ _stream_render() {
             fi ;;
         tool_end)
             log "DEBUG: [RENDER] tool_end _TOOL_NAME=[${_TOOL_NAME:-}] _TOOL_DESC=[${_TOOL_DESC:-}] frame_name=$(jq -r '.name // "?"' <<< "$_line" 2>/dev/null)"
-            [[ -z "$_TOOL_NAME" ]] && return 0
+            [[ -z "$_TOOL_NAME" ]] && { log "DEBUG: [RENDER] tool_end SKIPPED — _TOOL_NAME empty"; return 0; }
             local _ela; _ela=$(jq -r '.elapsed_str // ""' <<< "$_line" 2>/dev/null)
             if _detect_termux; then
                 printf '\r\033[K\n' >/dev/tty
             else
                 printf '\033[?25l\033[1A\r\033[K\033[?25h'
             fi
+            log "DEBUG: [RENDER] tool_end EXECUTED cursor-up for [$_TOOL_NAME]"
             _TOOL_NAME="" _TOOL_DESC="" ;;
         tool_tick)
             local _ela; _ela=$(jq -r '.elapsed_str // ""' <<< "$_line" 2>/dev/null)
@@ -1584,8 +1587,10 @@ _stream_render() {
             fi ;;
         tree)
             local _entries; _entries=$(jq -c '.entries // []' <<< "$_line" 2>/dev/null)
+            local _tr_total; _tr_total=$(jq 'length' <<< "$_entries" 2>/dev/null || echo 0)
+            log "DEBUG: [RENDER] tree begin count=$_tr_total ts=$(_timestamp_ms)"
             if [[ -n "$_entries" && "$_entries" != "[]" ]]; then
-                local _idx=0 _total; _total=$(jq 'length' <<< "$_entries")
+                local _idx=0 _total; _total=$_tr_total
                 while IFS= read -r _entry; do
                     [[ -z "$_entry" ]] && continue
                     _idx=$((_idx + 1))
@@ -1596,6 +1601,7 @@ _stream_render() {
                     } <<< "$(jq -r '(.name // "?"), (.elapsed_str // "")' <<< "$_entry" 2>/dev/null)" || true
                     _td=$(jq -r '.desc // ""' <<< "$_entry")
                     if (( _idx == _total )); then _branch="└"; else _branch="├"; fi
+                    log "DEBUG: [RENDER] tree entry idx=$_idx total=$_total name=$_tn branch=$_branch ts=$(_timestamp_ms)"
                     printf '    %s%s%s %s (%s%s%s)' \
                         "$LIGHT_YELLOW" "$_branch" "$RESET" \
                         "$_tn" \
@@ -11865,7 +11871,7 @@ tool_read_file() {
         printf 'Warning: file appears to be binary; output may be garbled\n'
         printf '%s\n' '---'
     fi
-    tail -n +"$offset" "$path" | head -n "$limit" | nl -ba -w4 -s' '
+    tail -n +"$offset" "$path" 2>/dev/null | head -n "$limit" | nl -ba -w4 -s' '
 }
 
 tool_write_file() {
@@ -14085,13 +14091,29 @@ run_turn() {
                                     local _pre_fmt; _pre_fmt=$(printf '%s' "$_pre_cmd" | _bash_format 2>/dev/null)
                                     if [[ -n "$_pre_fmt" ]]; then
                                         _stream_emit "text" "$(jq -nc --arg c '──── Script ────' '{content: $c}')" || true
-                                        while IFS= read -r _pre_line; do
-                                            [[ -z "$_pre_line" ]] && _pre_line=" "
-                                            _stream_emit "text" "$(jq -nc --arg c "    $_pre_line" '{content: $c}')" || true
-                                        done <<< "$_pre_fmt"
+                                        local _pf_max=30 _pf_i _pf_line _pf_count _pf_total _pf_remaining _pf_head_bytes
+                                        _pf_total=${#_pre_fmt}
+                                        local -a _pf_lines
+                                        mapfile -t _pf_lines <<< "$_pre_fmt"
+                                        _pf_count=${#_pf_lines[@]}
+                                        _pf_head_bytes=0
+                                        for ((_pf_i=0; _pf_i<_pf_count; _pf_i++)); do
+                                            _pf_line="${_pf_lines[_pf_i]}"
+                                            [[ -z "$_pf_line" ]] && _pf_line=" "
+                                            if (( _pf_i < _pf_max )); then
+                                                _stream_emit "text" "$(jq -nc --arg c "    $_pf_line" '{content: $c}')" || true
+                                                _pf_head_bytes=$((_pf_head_bytes + ${#_pf_lines[_pf_i]} + 1))
+                                            fi
+                                        done
+                                        if (( _pf_count > _pf_max )); then
+                                            _pf_remaining=$((_pf_total - _pf_head_bytes))
+                                            (( _pf_remaining < 0 )) && _pf_remaining=0
+                                            _stream_emit "text" "$(jq -nc --arg c "    ...(${_pf_remaining} more chars)" '{content: $c}')" || true
+                                        fi
                                         _stream_emit "text" "$(jq -nc --arg c '──── End Script ────' '{content: $c}')" || true
                                     fi
                                 fi
+                                log "DEBUG: [TS] tool_start emit name=$tool_name tool_id=$tool_id ts=$(_timestamp_ms)"
                                 _stream_emit "tool_start" "$(jq -nc \
                                    --arg n "$tool_name" --arg id "$tool_id" --arg d "${_tsub_label:-}" \
                                    '{name: $n, id: $id, desc: $d}')" || { local _rc=$?; log "DEBUG: [PIPE] tool_start emit rc=$_rc (FIFO broken?)"; true; }
@@ -14139,7 +14161,8 @@ run_turn() {
                     if (( ! _safe_skip )); then
                         case "$tool_name" in
                             agent|web_search|agent_batch|make_todos|undo|request) ;;
-                            *) _stream_emit "tool_end" "$(jq -nc \
+                            *) log "DEBUG: [TS] tool_end emit name=$tool_name ts=$(_timestamp_ms)"
+                                _stream_emit "tool_end" "$(jq -nc \
                                    --arg n "$tool_name" --arg e "$(ui_time $_ts_elapsed)" --argjson err "$_terr" \
                                    '{name: $n, elapsed_str: $e, error: $err}')" || { local _rc=$?; log "DEBUG: [PIPE] tool_end emit rc=$_rc (FIFO broken?)"; true; } ;;
                         esac
@@ -14240,6 +14263,7 @@ run_turn() {
                                 '{name: $n, elapsed_str: $e, desc: $d}'
                         fi
                     done | jq -s '.')
+                    log "DEBUG: [TS] tree emit count=$_TOOL_TREE_COUNT ts=$(_timestamp_ms)"
                     _stream_emit "tree" "$(jq -nc --argjson entries "$_entries_json" '{entries: $entries}')"
                 fi
 
