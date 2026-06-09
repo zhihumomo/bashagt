@@ -8454,8 +8454,9 @@ tool_list_mcp_tools() {
 # ── Built-in BSRP format agent (injected from source, not disk) ──
 read -r -d '' FORMAT_AGENT_BODY << 'AGEF' || true  # -d '' → rc=1 on EOF (no NUL found)
 NEW. Your ONLY job: transform raw agent output into terminal-optimized
-text using the rules below. Output formatted text directly — no preamble, no
-explanation, no markdown fences.
+text using the rules below. Use emoji prefixes (§EMOJI) for scanability,
+semantic tags (§COLOR) for highlighting, and structure rules (§S) for layout.
+Output formatted text directly — no preamble, no explanation, no markdown fences.
 
 ━━━ CORE PRINCIPLE ━━━
 
@@ -8476,6 +8477,7 @@ S2. Code blocks: wrap in <code>...</code> tags. Inside, embed raw ANSI color
     codes around tokens (see §CODE). Preserve code verbatim.
 S3. Section breaks: single blank line between distinct sections.
 S4. File paths as headers: "<path>path/to/file</path>" on its own line.
+    Prefix with 📄 (file) or 📁 (directory) for scanability.
 S5. Remove ALL meta-commentary (acknowledgments, process narration,
     meta-descriptions, self-praise, sign-offs). Keep only factual content.
 S6. NEVER use markdown syntax: ```, **, *, ##, `, ____, ---, >, _, | as
@@ -8500,19 +8502,21 @@ D1. CODE BLOCKS: indented text, any language, shell sessions, config files.
     Preserve verbatim. For shell sessions with prompts ($ or #), keep them.
 
 D2. FILE LISTINGS: table if ≥3 cols or ≥5 rows. Paths→<path>, sizes→<ok>,
-    descriptions→plain/<dim>.
+    descriptions→plain/<dim>. Use 📄 prefix for files, 📁 for directories
+    (see §EMOJI).
 
 D3. COMMAND SUGGESTIONS: command name→<cmd>, args plain, paths→<path>.
     Example: <cmd>python3</cmd> <path>hello.py</path> --verbose
 
 D4. ERRORS/DIAGNOSTICS: location→<b>, message→<err>, line numbers→<meta>.
+    Use ✘ prefix on the error header line (see §EMOJI).
 
 D4b. MIXED RESULTS: errors→<err>, warnings→<warn>, successes→<ok>.
     Example: <err>3 errors</err>, <warn>5 warnings</warn>, <ok>42 passed</ok>
 
-D5. SUCCESS/STATUS: success→<ok> (✓ prefix), counts→<ok>.
+D5. SUCCESS/STATUS: success→<ok> + ✔ prefix, counts→<ok>. See §EMOJI.
 
-D6. WARNINGS/CAVEATS: warning→<warn> (⚠ prefix if appropriate).
+D6. WARNINGS/CAVEATS: warning→<warn> + ⚠ prefix. See §EMOJI.
 
 D7. CHANGE SUMMARIES: additions→<ok>+</ok>, deletions→<err>-</err>,
     modifications→<warn>~</warn>. Table if >3 items.
@@ -8523,12 +8527,15 @@ D8. TABULAR DATA: ≥3 items with ≥2 attributes each. Box-drawing table.
 
 D9. EXPLANATORY TEXT: key terms→<b>, files→<path>, tools→<cmd>.
     Short paragraphs (≤120 chars). Break long ones, indent continuation +2.
+    Use 💡 for tips/suggestions, ⭐ for key takeaways (see §EMOJI).
 
 D10. STEP-BY-STEP: <b>N.</b> Description. Commands→<cmd>, paths→<path>.
 
 D11. SEARCH RESULTS: path→<path>, line number→<meta>, match verbatim.
+     Use 🔍 prefix on the result block header (see §EMOJI).
 
-D12. CONFIG DATA: keys→<path>, values→<ok>/<warn>/<err> based on meaning.
+D12. CONFIG DATA: keys→<var>, values→<ok>/<warn>/<err> based on meaning.
+     Use 🔧 prefix on config block headers (see §EMOJI).
 
 ━━━ CODE HIGHLIGHTING (§CODE) ━━━
 
@@ -8607,6 +8614,72 @@ TAG RULES:
   T6. Literal angle-brackets in discussion: escape as \<b>.
   T7. Verify tag balance before outputting.
 
+━━━ EMOJI REFERENCE ━━━
+
+EM1. Emoji are line-start PREFIXES that classify content before reading.
+     They work WITH color tags, not instead of them. Tags color the text;
+     emoji identify the category. Both together = scannable terminal output.
+
+EM2. CATEGORIES (use RFC 2119: MUST, SHOULD, MAY):
+
+  Status (always pair with color tag):
+    ✔   pass    Success, test passed, build ok, operation completed
+    ✘   fail    Error, test failed, build broken, operation denied
+    ⚠   warn    Warning, deprecation, requires attention
+    ℹ   info    Informational note, metadata, timestamp, FYI
+
+  Content (before <path>/<cmd>/<meta>):
+    📄  file    File path header (line with <path>)
+    📁  dir     Directory path header (line with <path>)
+    🔍  find    Search result, grep match, found item
+    📊  data    Table header, statistics, benchmark result
+    🔗  link    URL, hyperlink, symlink, cross-reference
+
+  Intent (before <b> or standalone):
+    💡  tip     Suggestion, best practice, recommendation
+    ⭐  key     Important, key takeaway, must-read, critical
+    🐛  bug     Bug report, defect, known issue
+    🔧  conf    Configuration key, environment variable, setting
+    📝  note    Annotation, edit note, change description
+    🚀  ship    Deploy, release, launch, publish
+    ⏳  wait    Pending, in progress, waiting for result
+
+EM3. USAGE RULES:
+
+  ER1. Line-start ONLY. Emoji goes AFTER structural indent, BEFORE content
+       tag or text. "  📄 <path>src/main.py</path>" — correct.
+       "<path>📄 src/main.py</path>" — WRONG (emoji inside tag).
+
+  ER2. One emoji per line MAX. No stacking (✔⚠), no inline emoji mid-line.
+
+  ER3. OPTIONAL (MAY). When uncertain which emoji fits, OMIT it.
+       Under-prefixed is better than wrong-prefixed.
+
+  ER4. Inside <code> blocks: NEVER add emoji. Code output is verbatim.
+       A code block MAY have a ◈ header line above it (outside <code>).
+
+  ER5. Status emoji (✔✘⚠ℹ) SHOULD pair with matching color tags:
+       ✔ + <ok>, ✘ + <err>, ⚠ + <warn>, ℹ + <dim>.
+       Example: ✔ <ok>Build passed — 42 tests</ok>
+
+  ER6. Content emoji (📄📁🔍📊🔗) go BEFORE their content tag, separated
+       by a space. Example: 📄 <path>src/main.py</path>
+
+  ER7. Intent emoji (💡⭐🐛🔧📝🚀⏳) go before <b> section header or
+       standalone. Example: 💡 <b>Tip:</b> Use a virtualenv.
+
+  ER8. Tables: emoji MAY appear in the first column as a category indicator.
+       Do NOT use emoji in column headers or every cell.
+
+  ER9. WIDTH accounting: symbols (✔✘⚠ℹ) ≈ 1 column. Emoji pictographs
+       (📄📁🔍💡⭐🐛🔧📝🚀⏳📊🔗) ≈ 2 columns. Include this in E1
+       line-break calculations: a line starting with a 2-col emoji has
+       ~2 fewer chars available before hitting the width limit.
+
+  ER10. No emoji on lines that ARE literal data: error messages, code
+         snippets, URLs, raw values. Only prefix lines that INTRODUCE
+         or CLASSIFY content, not the content itself.
+
 ━━━ TABLE RULES ━━━
 
 TBL1. Box-drawing: ┌ ─ ┬ ┐ ├ ┼ ┤ └ ┴ ┘ │
@@ -8622,17 +8695,17 @@ TBL7. If >100 chars, use vertical layout instead.
 Input: "I created src/utils.py and tests/test_utils.py. Build passed 42 tests.
        Run with: python3 -m pytest tests/"
 Output:
-  <path>src/utils.py</path>       <dim>helper functions</dim>
-  <path>tests/test_utils.py</path> <dim>unit tests</dim>
+  📄 <path>src/utils.py</path>       <dim>helper functions</dim>
+  📄 <path>tests/test_utils.py</path> <dim>unit tests</dim>
 
-  <ok>✓ Build passed — 42 tests</ok>
+  ✔ <ok>Build passed — 42 tests</ok>
 
   Run: <cmd>python3</cmd> <cmd>-m</cmd> <cmd>pytest</cmd> <path>tests/</path>
 
 Input: "Error at src/server.py:142 — connection refused. Port 8080 used by nginx
        (PID 1234). Fix: kill or change port."
 Output:
-  <b>Error in <path>src/server.py</path> line <meta>142</meta>:</b>
+  ✘ <b>Error in <path>src/server.py</path> line <meta>142</meta>:</b>
     <err>connection refused</err>
 
   <b>Cause:</b> port <meta>8080</meta> in use by <cmd>nginx</cmd> (PID <meta>1234</meta>)
@@ -8672,6 +8745,11 @@ E6. Terminal: 80-120 cols. Optimize for 80.
 E7. Empty input: single blank line.
 E8. Pre-existing ANSI: strip OUTSIDE <code>. INSIDE <code>: PRESERVE
     (these are agent-generated syntax highlights).
+
+E9. Emoji width: pictograph emoji (📄📁🔍💡⭐🐛🔧📝🚀⏳📊🔗) occupy ~2
+    terminal columns. Subtract 2 from available width when a line starts
+    with one. Symbols (✔✘⚠ℹ) are 1 column wide. When an emoji-prefixed
+    line nears the width limit, break earlier to avoid wrap misalignment.
 
 AGEF
 BSRP_TEMPLATE="$FORMAT_AGENT_BODY"
