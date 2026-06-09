@@ -368,6 +368,9 @@ PARALLEL SUB-AGENT DELEGATION
     - Multiple independent searches are needed simultaneously (e.g.,
       "find auth logic" + "find db queries" + "find API routes")
 
+    Tasks can use the same agent type for parallel exploration, or mix
+    different agents for pipelined workflows (e.g., explore → summarize).
+
     Example — complex project exploration:
       agent_batch({tasks: [
         {agent:"explore", prompt:"map the src/auth/ module — all files,
@@ -389,6 +392,19 @@ PARALLEL SUB-AGENT DELEGATION
         {agent:"explore", prompt:"identify class hierarchies,
           inheritance chains, and interface implementations"}
       ]})
+
+    Example — explore + summarize pipeline:
+      agent_batch({tasks: [
+        {agent:"explore", prompt:"find all error handling patterns
+          in src/ — log.Fatal, errors.Wrap, panic recovery"},
+        {agent:"explore", prompt:"locate all database migration
+          files and their version numbering scheme"},
+        {agent:"summarize", prompt:"read the CODE_STYLE.md
+          document and summarize the key conventions"}
+      ]})
+
+    (Prompt fields simplified in examples above — real usage should include
+    compressed context, explicit instructions, and completion criteria.)
 
 ASYNC SUB-AGENT DELEGATION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3697,8 +3713,80 @@ AGEF
         cat > "$HOME/.bashagt/agents/summarize.md" << 'AGEF'
 {"name":"summarize","description":"Summarize files, code, or conversation history concisely","max_tokens":12288,"thinking_budget":0,"tools":["read_file"]}
 
-You summarize content. Keep key info: file paths, functions, decisions, numbers.
-Use bullet format. One paragraph max. Output ONLY the summary.
+You are a content summarization specialist. You distill text into dense, actionable summaries while preserving critical information. READ-ONLY — output the summary, nothing else.
+
+━━━ GENERAL PRINCIPLES ━━━
+
+- Be concise. Strip adjectives, filler, transition phrases. Every word earns its place.
+- Be actionable. Preserve what the caller needs for their next step — the summary is
+  a tool for decision-making, not a book report.
+- Be faithful. Do not add conclusions, judgments, or interpretations not present in
+  the original. If the source says "the server crashed", do not say "the server is
+  unreliable."
+- Be neutral. Present facts as facts, opinions as opinions. Attribute claims to their
+  source when attribution matters.
+
+━━━ OUTPUT FORMAT ━━━
+
+  ## Summary
+
+  ### <Category 1>
+  - <key point — one line max>
+  - <key point — one line max>
+
+  ### <Category 2>
+  - <key point — one line max>
+
+  Use backticks for file paths (`src/auth/login.go`), function names (`handleLogin`),
+  and variable names (`_sessionTTL`). Use 4-backtick fences for code snippets.
+  Total summary length MUST NOT exceed 20% of the original content.
+
+  Choose categories based on content type:
+  - Code file → Functions, Dependencies, Key Logic, Entry Points
+  - Conversation → Decisions Made, Action Items, User Preferences, Open Questions
+  - Documentation → Purpose, Setup, API/Config, Constraints
+  - Error/Log → Error Type, Location, Stack Frames (key only), Probable Cause
+  - Search results → Files Found, Matches (path:line + snippet), Missing/Not Found
+
+━━━ WHAT TO PRESERVE ━━━
+
+  Code files:
+    Keep: file path, class/function signatures, key logic flow, external dependencies
+    Drop: comments, blank lines, import/require lists (unless relevant to the task)
+
+  Conversation history:
+    Keep: decisions reached, TODOs assigned, user preferences/constraints, agreed scope
+    Drop: greetings, intermediate reasoning, failed attempts (unless the failure IS
+    the finding), small talk, repeated points
+
+  Documentation / README:
+    Keep: purpose, install steps, API endpoints, config keys, constraints/warnings
+    Drop: example code blocks, FAQ, changelog, badges, contributor guides
+
+  Error messages / logs:
+    Keep: error type (panic, timeout, 404), key stack frames (file:line + function),
+    the location where the error originated
+    Drop: full stack traces, repeated log lines, timestamps, log level prefixes
+
+  Search results:
+    Keep: matched files with line numbers, matched content snippets (trim to context)
+    Drop: empty results (unless all searches returned nothing — then report one)
+
+  Mixed / hybrid content:
+    Priority order: Decisions > File paths > Function signatures > Numbers > Status
+    Drop: emotional language, hedging ("maybe", "possibly"), self-references
+
+━━━ DETAILED RULES ━━━
+
+- Same symbol, multiple files → list all locations: "handleError in auth.go:42,
+  db.go:108, api.go:231". Do not collapse into "handleError in multiple files."
+- Numbers need context: not "timeout: 30" but "timeout: 30s, set in config.go:42".
+- Versions, dates, config values → preserve verbatim. Do not round or reformat.
+- If uncertain about a fact, mark it `(uncertain)`. Never guess or smooth over gaps.
+- Original content < 200 characters → output it verbatim. Do not summarize.
+- If the input contains pre-existing summaries → focus on what THEY omitted.
+- When compressing for context window economy, prioritize removing verbose examples
+  and verbose explanations over removing facts, paths, or decisions.
 AGEF
 
     fi
@@ -7924,8 +8012,8 @@ build_agent_schema() {
         description:("Delegate multi-step work to a sub-agent. Available: \($alist). Use agent for: planning before coding, code review after coding, complex searches, or summarization. Sub-agents can use tools independently across multiple rounds."),
         input_schema:{type:"object", properties:{
             agent:{type:"string", description:"Sub-agent name"},
-            description:{type:"string", description:"Specific, detailed description (≤80 chars) of what this sub-agent will do. Include investigation targets, scope, and expected findings — not a vague summary. Shown in UI."},
-            prompt:{type:"string", description:"Task description for the sub-agent"},
+            description:{type:"string", description:"One-line task summary (≤80 chars), shown in the UI spinner. Be specific about target, scope, and expected output. Example: \"Find all callers of handle_auth in src/\" not \"Explore the code\"."},
+            prompt:{type:"string", description:"Detailed task brief for the sub-agent (≤2000 chars). Three parts: (1) Provide necessary compressed context — paste relevant code snippets, file paths, errors, findings, etc. Give only the minimum context needed, avoiding information overload and wasted exploration turns. (2) Instructions — what to do, what to find, what output format. (3) Completion criteria — when the task is considered done."},
             async:{type:"boolean", description:"If true, return a job_id immediately instead of waiting. Use job_poll/job_result to manage the async job."}
         }, required:["agent","prompt","description"]}
     }'
@@ -11750,7 +11838,7 @@ EOF
 )
 
 TOOL_AGENT_BATCH_SCHEMA=$(cat <<'EOF'
-{"name":"agent_batch","description":"Execute up to 4 sub-agent tasks in parallel and return all results once every task completes. Each task runs as an independent sub-agent with the same freedom as a direct agent() call. Blocks until all finish.","input_schema":{"type":"object","properties":{"tasks":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","properties":{"agent":{"type":"string","description":"Sub-agent name"},"description":{"type":"string","description":"Specific, detailed description (≤80 chars) of what this task accomplishes. Be precise about scope and expected results — not a vague summary. Shown in UI."},"prompt":{"type":"string","description":"Task description/prompt"}},"required":["agent","prompt","description"]}}},"required":["tasks"]}}
+{"name":"agent_batch","description":"Execute up to 4 sub-agent tasks in parallel and return all results once every task completes. Each task runs as an independent sub-agent with the same freedom as a direct agent() call. Blocks until all finish.","input_schema":{"type":"object","properties":{"tasks":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"object","properties":{"agent":{"type":"string","description":"Sub-agent name"},"description":{"type":"string","description":"One-line task summary (≤80 chars), shown in the UI spinner. Be specific about target, scope, and expected output. Example: \"Find all callers of handle_auth in src/\" not \"Explore the code\"."},"prompt":{"type":"string","description":"Detailed task brief for the sub-agent (≤2000 chars). Three parts: (1) Provide necessary compressed context — paste relevant code snippets, file paths, errors, findings, etc. Give only the minimum context needed, avoiding information overload and wasted exploration turns. (2) Instructions — what to do, what to find, what output format. (3) Completion criteria — when the task is considered done."}},"required":["agent","prompt","description"]}}},"required":["tasks"]}}
 EOF
 )
 
