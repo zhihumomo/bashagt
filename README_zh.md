@@ -6,8 +6,8 @@
 
 [![Bash](https://img.shields.io/badge/bash-4.0%2B-green?logo=gnubash)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL%20%7C%20Termux%20%7C%20iSH-blue)]()
-[![Lines](https://img.shields.io/badge/lines-16,122-orange)]()
-[![Functions](https://img.shields.io/badge/functions-447-purple)]()
+[![Lines](https://img.shields.io/badge/lines-16,796-orange)]()
+[![Functions](https://img.shields.io/badge/functions-464-purple)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 [![Status](https://img.shields.io/badge/status-preview-yellow)]()
 
@@ -67,7 +67,7 @@ bash 是 Unix 世界的公分母。它不挑硬件，不挑发行版，不挑内
 
 Bashagt 就是这个问题的答案。
 
-它是一个 **16122 行纯 bash 脚本**。没有 Node。没有 Python。没有 pip。没有 npm。没有任何你叫得上名字的运行时依赖。
+它是一个 **16796 行纯 bash 脚本**。没有 Node。没有 Python。没有 pip。没有 npm。没有任何你叫得上名字的运行时依赖。
 
 它的全部身家就是三个东西——三样在任何类 Unix 系统上都唾手可得的东西：
 
@@ -113,7 +113,7 @@ Bashagt 只是一颗种子。但它指向的方向很简单：
 
 ## ✨ 特性
 
-- 🐚 **纯 Bash 实现** — 16,122 行代码，447 个函数，无 Node/Python 运行时依赖
+- 🐚 **纯 Bash 实现** — 16,796 行代码，464 个函数，无 Node/Python 运行时依赖
 - ⚡ **零 Fork 热路径** — 增量消息拼接、哈希驱动缓存、纯 bash 请求体、跨回合持久化渲染器；最小化每轮 subshell 开销
 - 🖥️ **全平台覆盖** — Linux (GNU)、macOS (BSD)、WSL、Termux (Android)、iSH (iPhone/iPad)
 - 🔧 **24 个内置工具** — 文件读写编辑删除、命令执行、网页搜索、子智能体调用、TODO 管理、技能系统……
@@ -805,6 +805,20 @@ cd test
 ---
 
 ## 📝 更新日志
+
+### 2026-06-09 — 集中化调色板 & 配置简化
+
+**🎨 集中化调色板** — 所有终端颜色（语法高亮、界面、diff、闪光、banner、提示符）现在统一定义在单个 `_color_palette()` 函数中 — 色系唯一真理来源。新增 `_color_assemble()` 和懒缓存 `_color_get()` + `_CLR_CACHE`，消除了 `_colors_resolve()`、`_bsrp_assemble()`、`_stream_render()`、`_in_submit_flash()`、`_safe_preview_diff()`、`print_banner()`、`_ui_emit()` 等函数中上百行深色/浅色模式的分支重复代码。深色/浅色模式切换现在只需清空缓存，无需重新执行所有颜色分支。新增调色板条目包括 `diff_add_bg`/`diff_add_fg`/`diff_del_bg`/`diff_del_fg`、`flash_bg`/`flash_fg`/`flash_safe_bg`/`flash_safe_fg`、`prompt_input`/`prompt_safe_on`、`banner_logo_L1`–`L6`/`banner_label` 以及多种强调色。
+
+**🗑️ 移除 `compress_threshold`** — `DEFAULT_COMPRESS_THRESHOLD` 和 `compress_threshold` 配置键从 `_init_settings_template()` 和 `load_config()` 中移除，简化用户配置界面。
+
+**📦 Script 预览框** — bash 命令预览现在渲染为带边框的盒子（`╭── Script ──...╮`），支持 ANSI 剥离后的宽度计算、终端宽度自适应和溢出截断。超过显示宽度的行尾部追加 `…`；超过 30 行显示 `...($N more lines)` 提示。
+
+**🐛 ANSI 剥离修复** — `_strip_ansi_sgr()` 关键修复：多序列 ANSI 剥离现改用 `${_s#*$'\033['*m}` 替代 `${_s#*m}`，正确处理连续转义序列。
+
+**📚 库生成更新** — `_emit_render_lib()` 和 `_emit_request_ui_lib()` 现在嵌入模式感知的 `_clr()` 辅助函数，替代硬编码的 ANSI 颜色变量（`DIM=`、`YELLOW=` 等），使生成的 `render.sh` 和 `request_ui.sh` 库在调用时能响应 `BASHAGT_DARK_MODE`。
+
+**🔍 调试日志扩展** — 新增 `log DEBUG` 日志点：子智能体迭代计数（`iter=$N`）、SSE 数据大小警告（>10KB）、格式化回调生命周期（`before jq`/`after jq`）、stream wrap fd 追踪（`fd1=`/`fd7=`/`fd8=` 含 `readlink`）、FIFO 初始化状态、`main()` `ppid=` 及参数日志。
 
 ### 2026-06-05 — 零 Fork 热路径 & 持久化渲染器
 

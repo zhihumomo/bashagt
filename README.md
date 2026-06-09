@@ -6,8 +6,8 @@
 
 [![Bash](https://img.shields.io/badge/bash-4.0%2B-green?logo=gnubash)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL%20%7C%20Termux%20%7C%20iSH-blue)]()
-[![Lines](https://img.shields.io/badge/lines-16,122-orange)]()
-[![Functions](https://img.shields.io/badge/functions-447-purple)]()
+[![Lines](https://img.shields.io/badge/lines-16,796-orange)]()
+[![Functions](https://img.shields.io/badge/functions-464-purple)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 [![Status](https://img.shields.io/badge/status-preview-yellow)]()
 
@@ -67,7 +67,7 @@ bash is the common denominator of the Unix world. It doesn't care about hardware
 
 Bashagt is the answer.
 
-It is a **16,122-line pure bash script**. No Node. No Python. No pip. No npm. No runtime dependency you've ever heard of.
+It is a **16,796-line pure bash script**. No Node. No Python. No pip. No npm. No runtime dependency you've ever heard of.
 
 Its entire arsenal consists of three things — three things that are everywhere on any Unix-like system:
 
@@ -113,7 +113,7 @@ Maybe when this vision becomes reality, people will look back at "you need Node 
 
 ## ✨ Features
 
-- 🐚 **Pure Bash** — 16,122 lines, 447 functions, zero Node/Python runtime dependencies
+- 🐚 **Pure Bash** — 16,796 lines, 464 functions, zero Node/Python runtime dependencies
 - ⚡ **Zero-Fork Hot Path** — incremental message assembly, hash-driven caches, pure-bash request body, persistent cross-turn renderer; minimizes per-turn subshell overhead
 - 🖥️ **Cross-Platform** — Linux (GNU), macOS (BSD), WSL, Termux (Android), iSH (iPhone/iPad)
 - 🔧 **24 Built-in Tools** — file read/write/edit/delete, command execution, web search, sub-agent delegation, TODO management, skill system…
@@ -807,6 +807,20 @@ cd test
 ---
 
 ## 📝 Changelog
+
+### 2026-06-09 — Centralized Color Palette & Config Simplification
+
+**🎨 Centralized Color Palette** — All terminal colors (syntax highlighting, UI chrome, diff, flash, banners, prompts) now defined in a single `_color_palette()` function — the sole source of truth. New `_color_assemble()` and lazy-cached `_color_get()` with `_CLR_CACHE` eliminate hundreds of lines of duplicated dark/light-mode branching throughout `_colors_resolve()`, `_bsrp_assemble()`, `_stream_render()`, `_in_submit_flash()`, `_safe_preview_diff()`, `print_banner()`, and `_ui_emit()`. Dark/light mode toggle is now a single cache flush instead of re-executing all color branches. Newly introduced palette entries include `diff_add_bg`/`diff_add_fg`/`diff_del_bg`/`diff_del_fg`, `flash_bg`/`flash_fg`/`flash_safe_bg`/`flash_safe_fg`, `prompt_input`/`prompt_safe_on`, `banner_logo_L1`–`L6`/`banner_label`, and accent colors.
+
+**🗑️ Removed `compress_threshold`** — `DEFAULT_COMPRESS_THRESHOLD` and the `compress_threshold` config key removed from `_init_settings_template()` and `load_config()`. Simplification of the user-facing configuration surface.
+
+**📦 Script Preview Box** — Bash command previews now render inside a bordered box (`╭── Script ──...╮`) with ANSI-stripped width calculation, terminal-width clamping, and overflow truncation (`…` continuation). Lines exceeding display width are truncated with a trailing `…`; previews over 30 lines show `...($N more lines)` notice.
+
+**🐛 ANSI Stripping Fix** — `_strip_ansi_sgr()` critical fix: multi-sequence ANSI strip now uses `${_s#*$'\033['*m}` instead of `${_s#*m}`, correctly handling consecutive escape sequences.
+
+**📚 Library Emission** — `_emit_render_lib()` and `_emit_request_ui_lib()` now embed a mode-aware `_clr()` helper function instead of hardcoded ANSI color variables (`DIM=`, `YELLOW=`, etc.), making the generated `render.sh` and `request_ui.sh` libraries respect `BASHAGT_DARK_MODE` at call time.
+
+**🔍 Expanded Debug Logging** — New `log DEBUG` points: sub-agent iteration count (`iter=$N`), SSE data size warnings (>10KB), format callback lifecycle (`before jq`/`after jq`), stream wrap fd tracking (`fd1=`/`fd7=`/`fd8=` with `readlink`), FIFO init status, `main()` `ppid=` and argument logging.
 
 ### 2026-06-05 — Zero-Fork Hot Path & Persistent Renderer
 

@@ -52,7 +52,6 @@ DEFAULT_THINKING_BUDGET="16384"
 DEFAULT_API_PROTOCOL="auto"   # auto | anthropic | openai
 DEFAULT_CONNECT_TIMEOUT="10"  # curl --connect-timeout (TCP/SSL handshake)
 DEFAULT_CMD_TIMEOUT="300"      # bash command timeout (5 min for agent_batch E2E test)
-DEFAULT_COMPRESS_THRESHOLD="250000"
 DEFAULT_SHOW_THINKING="status"  # "full" | "status" | "off"
 # Async compression coordination
 COMPRESS_LOCK="${TMPDIR:-/tmp}/bashagt_compress.lock"
@@ -745,63 +744,111 @@ _log_err_trap() {
 _log_enable_err_trap()  { trap '_log_err_trap' ERR; }
 
 
+# ── Color palette (single source of truth) ──
+# Format: name|dark_sgr|light_sgr|category
+# sgr = params between \033[ and m (e.g. "38;2;R;G;B" or "1" for bold)
+_color_palette() {
+    cat <<'PALETTE'
+kw|38;2;86;156;214|38;2;0;0;255|syntax
+str|38;2;206;145;120|38;2;163;21;21|syntax
+cmt|38;2;106;153;85|38;2;0;128;0|syntax
+fn|38;2;220;220;170|38;2;121;94;38|syntax
+cls|38;2;78;201;176|38;2;38;127;127|syntax
+var|38;2;156;220;254|38;2;0;16;128|syntax
+num|38;2;181;206;168|38;2;9;134;88|syntax
+dec|38;2;255;215;0|38;2;128;128;0|syntax
+esc|38;2;215;186;125|38;2;128;80;0|syntax
+ok|38;2;106;153;85|38;2;0;128;0|ui
+err|38;2;244;71;71|38;2;163;21;21|ui
+warn|38;2;220;220;170|38;2;121;94;38|ui
+path|38;2;86;156;214|38;2;0;0;255|ui
+cmd|38;2;220;220;170|38;2;121;94;38|ui
+meta|38;2;128;128;128|38;2;100;100;100|ui
+sel|7|7|ui
+pink|38;5;218|38;5;168|accent
+cyan_bold|1;36|38;2;0;120;120|accent
+diff_add_bg|48;2;20;50;30|48;2;230;255;235|diff
+diff_add_fg|38;2;87;210;120|38;2;40;167;69|diff
+diff_del_bg|48;2;50;18;22|48;2;255;235;238|diff
+diff_del_fg|38;2;245;100;110|38;2;215;58;73|diff
+flash_bg|48;2;20;25;55|48;2;235;240;255|flash
+flash_fg|38;2;100;170;255|38;2;40;70;180|flash
+flash_safe_bg|48;2;60;40;15|48;2;255;245;225|flash
+flash_safe_fg|38;2;255;200;80|38;2;180;130;30|flash
+prompt_input|1;36|38;2;0;120;120|prompt
+prompt_safe_on|1;93|38;2;200;160;0|prompt
+banner_logo_L1|1;36|38;2;0;140;140|banner
+banner_logo_L2|1;36|38;2;0;130;140|banner
+banner_logo_L3|1;36|38;2;0;120;145|banner
+banner_logo_L4|1;36|38;2;0;110;150|banner
+banner_logo_L5|1;36|38;2;0;100;150|banner
+banner_logo_L6|1;36|38;2;0;90;145|banner
+banner_label|90|38;2;100;100;100|banner
+bold|1|1|chrome
+dim|2|2|chrome
+reset|0|0|chrome
+PALETTE
+}
+
+# Assemble a raw SGR param string into a full ANSI escape sequence.
+# Uses printf -v to avoid subshell overhead.
+_color_assemble() {
+    local _outvar="$1" _params="$2"
+    [[ -z "$_params" || "$_params" == "-" ]] && { printf -v "$_outvar" ''; return; }
+    printf -v "$_outvar" '\033[%sm' "$_params"
+}
+
+# Look up a color by name, with lazy-cached palette resolution.
+# First call fills the full cache; subsequent calls are O(1) reads.
+declare -A _CLR_CACHE
+_color_get() {
+    local _name="$1"
+    [[ -z "${_CLR_CACHE[$_name]:-}" ]] && {
+        local _n _dark _light _cat _mode_dark
+        [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]] && _mode_dark=1 || _mode_dark=0
+        while IFS='|' read -r _n _dark _light _cat; do
+            [[ -z "$_n" || "$_n" == '#'* ]] && continue
+            if (( _mode_dark )); then
+                printf -v '_CLR_CACHE[$_n]' '\033[%sm' "$_dark"
+            else
+                printf -v '_CLR_CACHE[$_n]' '\033[%sm' "$_light"
+            fi
+        done < <(_color_palette)
+    }
+    printf '%s' "${_CLR_CACHE[$_name]:-}"
+}
+
 # ── Color palette resolver (VS Code Dark+ / Light+) ──
 # Called at init and on dark_mode toggle. Sets all semantic color variables.
 # Also sets legacy aliases for backward compat (GREEN, CYAN, YELLOW, RED, GRAY,
 # LIGHT_GREEN, LIGHT_YELLOW, INVERT, LIGHT_PINK, LIGHT_CYAN).
 _colors_resolve() {
-    if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
-        # ── VS Code Dark+ ──
-        # Code token colors
-        KW=$'\033[38;2;86;156;214m'          # #569CD6 keyword blue
-        STR=$'\033[38;2;206;145;120m'         # #CE9178 string orange
-        CMT=$'\033[38;2;106;153;85m'          # #6A9955 comment green
-        FN=$'\033[38;2;220;220;170m'          # #DCDCAA function yellow
-        CLS=$'\033[38;2;78;201;176m'          # #4EC9B0 class teal
-        VAR=$'\033[38;2;156;220;254m'         # #9CDCFE variable light blue
-        NUM=$'\033[38;2;181;206;168m'         # #B5CEA8 number light green
-        DEC=$'\033[38;2;255;215;0m'           # #FFD700 decorator gold
-        ESC=$'\033[38;2;215;186;125m'         # #D7BA7D escape brown
-        # UI colors
-        OK_COLOR=$'\033[38;2;106;153;85m'     # #6A9955 (= CMT, same green)
-        ERR_COLOR=$'\033[38;2;244;71;71m'     # #F44747 error red
-        WARN_COLOR=$'\033[38;2;220;220;170m'  # #DCDCAA (= FN, same yellow)
-        PATH_COLOR=$'\033[38;2;86;156;214m'   # #569CD6 (= KW, same blue)
-        CMD_COLOR=$'\033[38;2;220;220;170m'   # #DCDCAA (= FN)
-        META_COLOR=$'\033[38;2;128;128;128m'  # #808080 gray
-        SEL_COLOR=$'\033[7m'                   # invert
-        # Legacy aliases
-        GREEN=$OK_COLOR; CYAN=$PATH_COLOR; YELLOW=$CMD_COLOR; RED=$ERR_COLOR
-        GRAY=$META_COLOR; INVERT=$SEL_COLOR
-        LIGHT_GREEN=$NUM; LIGHT_YELLOW=$DEC
-        LIGHT_PINK=$'\033[38;5;218m'; LIGHT_CYAN=$'\033[1;36m'
-    else
-        # ── VS Code Light+ ──
-        KW=$'\033[38;2;0;0;255m'              # #0000FF
-        STR=$'\033[38;2;163;21;21m'           # #A31515
-        CMT=$'\033[38;2;0;128;0m'             # #008000
-        FN=$'\033[38;2;121;94;38m'            # #795E26
-        CLS=$'\033[38;2;38;127;127m'          # #267F7F
-        VAR=$'\033[38;2;0;16;128m'            # #001080
-        NUM=$'\033[38;2;9;134;88m'            # #098658
-        DEC=$'\033[38;2;128;128;0m'           # #808000
-        ESC=$'\033[38;2;128;80;0m'            # #805000
-        OK_COLOR=$'\033[38;2;0;128;0m'        # #008000 (= CMT)
-        ERR_COLOR=$'\033[38;2;163;21;21m'     # #A31515 (= STR)
-        WARN_COLOR=$'\033[38;2;121;94;38m'    # #795E26 (= FN)
-        PATH_COLOR=$'\033[38;2;0;0;255m'      # #0000FF (= KW)
-        CMD_COLOR=$'\033[38;2;121;94;38m'     # #795E26 (= FN)
-        META_COLOR=$'\033[38;2;128;128;128m'  # #808080
-        SEL_COLOR=$'\033[7m'
-        GREEN=$OK_COLOR; CYAN=$PATH_COLOR; YELLOW=$CMD_COLOR; RED=$ERR_COLOR
-        GRAY=$META_COLOR; INVERT=$SEL_COLOR
-        LIGHT_GREEN=$NUM; LIGHT_YELLOW=$DEC
-        LIGHT_PINK=$'\033[38;5;218m'; LIGHT_CYAN=$'\033[1;36m'
-    fi
-    BOLD=$'\033[1m'
-    DIM=$'\033[2m'
-    RESET=$'\033[0m'
-    # Rebuild BSRP with current mode's color table
+    _CLR_CACHE=()
+    local _name _dark _light _cat _code _mode_dark
+    [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]] && _mode_dark=1 || _mode_dark=0
+
+    while IFS='|' read -r _name _dark _light _cat; do
+        [[ -z "$_name" || "$_name" == '#'* ]] && continue
+        if (( _mode_dark )); then
+            printf -v _code '\033[%sm' "$_dark"
+        else
+            printf -v _code '\033[%sm' "$_light"
+        fi
+        _CLR_CACHE[$_name]="$_code"
+        case "$_cat" in
+            syntax) printf -v "${_name^^}"           '%s' "$_code" ;;
+            ui)     printf -v "${_name^^}_COLOR"     '%s' "$_code" ;;
+            diff|flash|prompt|banner|chrome|accent)
+                    printf -v "$(tr 'a-z' 'A-Z' <<< "$_name")" '%s' "$_code" ;;
+        esac
+    done < <(_color_palette)
+
+    # Legacy aliases (backward compatible)
+    GREEN=$OK_COLOR; CYAN=$PATH_COLOR; YELLOW=$CMD_COLOR; RED=$ERR_COLOR
+    GRAY=$META_COLOR; INVERT=$SEL_COLOR
+    LIGHT_GREEN=$NUM; LIGHT_YELLOW=$DEC
+    LIGHT_PINK=$PINK; LIGHT_CYAN=$CYAN_BOLD
+
     _bsrp_assemble
 }
 
@@ -810,59 +857,38 @@ _colors_resolve() {
 _bsrp_assemble() {
     [[ -z "${BSRP_TEMPLATE:-}" ]] && return 0
     local _table _examples
-    if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
-        _table='  kw  = \033[38;2;86;156;214m    #569CD6  blue    if/for/def/class/return
-  str = \033[38;2;206;145;120m   #CE9178  orange  "hello" '"'"'world'"'"'
-  cmt = \033[38;2;106;153;85m    #6A9955  green   # comment // comment
-  fn  = \033[38;2;220;220;170m   #DCDCAA  yellow  greet() grep echo
-  cls = \033[38;2;78;201;176m    #4EC9B0  teal    MyClass ValueError
-  var = \033[38;2;156;220;254m   #9CDCFE  lt-blue name $HOME ${VAR}
-  num = \033[38;2;181;206;168m   #B5CEA8  lt-grn  42 3.14 0xFF
-  dec = \033[38;2;255;215;0m     #FFD700  gold    @decorator
-  esc = \033[38;2;215;186;125m   #D7BA7D  brown   \n \t \\ (in strings)
-  rst = \033[0m                                   reset all'
-        _examples='Python example:
-<code>
-\033[38;2;86;156;214mdef\033[0m \033[38;2;220;220;170mgreet\033[0m(\033[38;2;156;220;254mname\033[0m):
-    \033[38;2;106;153;85m"""Say hello."""\033[0m
-    \033[38;2;86;156;214mreturn\033[0m \033[38;2;206;145;120mf"Hello, {\033[0m\033[38;2;156;220;254mname\033[0m\033[38;2;206;145;120m}!"\033[0m
-</code>
+
+    printf -v _table \
+        '  kw  = %s    #569CD6  blue    if/for/def/class/return\n' "$KW"
+    _table+=$(printf '  str = %s   #CE9178  orange  "hello"'"'"'world'"'"'\n' "$STR")
+    _table+=$(printf '  cmt = %s    #6A9955  green   # comment // comment\n' "$CMT")
+    _table+=$(printf '  fn  = %s   #DCDCAA  yellow  greet() grep echo\n' "$FN")
+    _table+=$(printf '  cls = %s    #4EC9B0  teal    MyClass ValueError\n' "$CLS")
+    _table+=$(printf '  var = %s   #9CDCFE  lt-blue name $HOME ${VAR}\n' "$VAR")
+    _table+=$(printf '  num = %s   #B5CEA8  lt-grn  42 3.14 0xFF\n' "$NUM")
+    _table+=$(printf '  dec = %s     #FFD700  gold    @decorator\n' "$DEC")
+    _table+=$(printf '  esc = %s   #D7BA7D  brown   \\n \\t \\\\ (in strings)\n' "$ESC")
+    _table+=$(printf '  rst = %s                                   reset all' "$RESET")
+
+    printf -v _examples 'Python example:\n<code>\n'
+    _examples+=$(printf '%sdef%s %sgreet%s(%sname%s):\n' \
+        "$KW" "$RESET" "$FN" "$RESET" "$VAR" "$RESET")
+    _examples+=$(printf '    %s"""Say hello."""%s\n' "$CMT" "$RESET")
+    _examples+=$(printf '    %sreturn%s %sf"Hello, {%s%sname%s%s}!"%s\n' \
+        "$KW" "$RESET" "$STR" "$RESET" "$VAR" "$RESET" "$STR" "$RESET")
+    _examples+='</code>
 
 Shell example:
 <code>
-\033[38;2;86;156;214mfor\033[0m \033[38;2;156;220;254mi\033[0m \033[38;2;86;156;214min\033[0m {\033[38;2;181;206;168m1\033[0m..\033[38;2;181;206;168m3\033[0m};
-\033[38;2;86;156;214mdo\033[0m
-    \033[38;2;220;220;170mecho\033[0m \033[38;2;206;145;120m"$i: \033[0m\033[38;2;156;220;254m$RANDOM\033[0m\033[38;2;206;145;120m"\033[0m
-    \033[38;2;220;220;170msleep\033[0m \033[38;2;181;206;168m1\033[0m
-\033[38;2;86;156;214mdone\033[0m
-</code>'
-    else
-        _table='  kw  = \033[38;2;0;0;255m       #0000FF  blue
-  str = \033[38;2;163;21;21m     #A31515  red
-  cmt = \033[38;2;0;128;0m       #008000  green
-  fn  = \033[38;2;121;94;38m     #795E26  brown
-  cls = \033[38;2;38;127;127m    #267F7F  teal
-  var = \033[38;2;0;16;128m      #001080  navy
-  num = \033[38;2;9;134;88m      #098658  green
-  dec = \033[38;2;128;128;0m     #808000  olive
-  esc = \033[38;2;128;80;0m      #805000  brown
-  rst = \033[0m'
-        _examples='Python example:
-<code>
-\033[38;2;0;0;255mdef\033[0m \033[38;2;121;94;38mgreet\033[0m(\033[38;2;0;16;128mname\033[0m):
-    \033[38;2;0;128;0m"""Say hello."""\033[0m
-    \033[38;2;0;0;255mreturn\033[0m \033[38;2;163;21;21mf"Hello, {\033[0m\033[38;2;0;16;128mname\033[0m\033[38;2;163;21;21m}!"\033[0m
-</code>
+'
+    _examples+=$(printf '%sfor%s %si%s %sin%s {%s1%s..%s3%s};\n' \
+        "$KW" "$RESET" "$VAR" "$RESET" "$KW" "$RESET" "$NUM" "$RESET" "$NUM" "$RESET")
+    _examples+=$(printf '%sdo%s\n' "$KW" "$RESET")
+    _examples+=$(printf '    %secho%s %s"$i: %s%s$RANDOM%s%s"%s\n' \
+        "$FN" "$RESET" "$STR" "$RESET" "$VAR" "$RESET" "$STR" "$RESET")
+    _examples+=$(printf '    %ssleep%s %s1%s\n' "$FN" "$RESET" "$NUM" "$RESET")
+    _examples+=$(printf '%sdone%s\n</code>' "$KW" "$RESET")
 
-Shell example:
-<code>
-\033[38;2;0;0;255mfor\033[0m \033[38;2;0;16;128mi\033[0m \033[38;2;0;0;255min\033[0m {\033[38;2;9;134;88m1\033[0m..\033[38;2;9;134;88m3\033[0m};
-\033[38;2;0;0;255mdo\033[0m
-    \033[38;2;121;94;38mecho\033[0m \033[38;2;163;21;21m"$i: \033[0m\033[38;2;0;16;128m$RANDOM\033[0m\033[38;2;163;21;21m"\033[0m
-    \033[38;2;121;94;38msleep\033[0m \033[38;2;9;134;88m1\033[0m
-\033[38;2;0;0;255mdone\033[0m
-</code>'
-    fi
     local _section; printf -v _section '%s\n\n%s\n\n%s\n\n%s' \
         'COLOR CONSTANTS (current mode):' \
         "$_table" \
@@ -1635,17 +1661,9 @@ _stream_render() {
                     if [[ -n "$_tc" ]]; then
                         while IFS= read -r _tcl; do
                             if [[ "$_tcl" =~ ^[[:space:]]*[0-9]+\ \+ ]]; then
-                                if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
-                                    printf '      \033[48;2;20;50;30m\033[38;2;87;210;120m%s\033[K\033[0m\n' "$_tcl"
-                                else
-                                    printf '      \033[48;2;230;255;235m\033[38;2;40;167;69m%s\033[K\033[0m\n' "$_tcl"
-                                fi
+                                printf '      %s%s%s\033[K%s\n' "$DIFF_ADD_BG" "$DIFF_ADD_FG" "$_tcl" "$RESET"
                             elif [[ "$_tcl" =~ ^[[:space:]]*[0-9]+\ - ]]; then
-                                if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
-                                    printf '      \033[48;2;50;18;22m\033[38;2;245;100;110m%s\033[K\033[0m\n' "$_tcl"
-                                else
-                                    printf '      \033[48;2;255;235;238m\033[38;2;215;58;73m%s\033[K\033[0m\n' "$_tcl"
-                                fi
+                                printf '      %s%s%s\033[K%s\n' "$DIFF_DEL_BG" "$DIFF_DEL_FG" "$_tcl" "$RESET"
                             else
                                 printf '      %s\n' "$_tcl"
                             fi
@@ -1710,12 +1728,38 @@ _emit_render_lib() {
         printf '%s\n' '# Source: bashagt --install or --update'
         printf '%s\n' '# Provides: _stream_render() — JSONL-to-ANSI renderer'
         printf '%s\n' ''
-        # Source the shared request UI library (single source of truth)
         printf '%s\n' '[[ -f "$HOME/.bashagt/lib/request_ui.sh" ]] && source "$HOME/.bashagt/lib/request_ui.sh"'
         printf '%s\n' ''
-        printf '%s\n' "DIM=\$'\\033[2m' ; RESET=\$'\\033[0m'"
-        printf '%s\n' "YELLOW=\$'\\033[33m' ; RED=\$'\\033[31m'"
-        printf '%s\n' "GRAY=\$'\\033[90m' ; GREEN=\$'\\033[32m' ; LIGHT_YELLOW=\$'\\033[93m'"
+        # Inline mode-aware color resolver (reads BASHAGT_DARK_MODE at call time)
+        printf '%s\n' '_clr() {'
+        printf '%s\n' '  if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then'
+        printf '%s\n' '    case "$1" in'
+        while IFS='|' read -r _name _dark _light _cat; do
+            [[ -z "$_name" || "$_name" == '#'* ]] && continue
+            case "$_name" in
+                err|cmd|meta|ok|sel|dim|reset|bold|dec|\
+                diff_add_bg|diff_add_fg|diff_del_bg|diff_del_fg)
+                    printf '\t    %s) printf "\\033[%sm" ;;\n' "$_name" "$_dark" ;;
+            esac
+        done < <(_color_palette)
+        printf '%s\n' '    esac'
+        printf '%s\n' '  else'
+        printf '%s\n' '    case "$1" in'
+        while IFS='|' read -r _name _dark _light _cat; do
+            [[ -z "$_name" || "$_name" == '#'* ]] && continue
+            case "$_name" in
+                err|cmd|meta|ok|sel|dim|reset|bold|dec|\
+                diff_add_bg|diff_add_fg|diff_del_bg|diff_del_fg)
+                    printf '\t    %s) printf "\\033[%sm" ;;\n' "$_name" "$_light" ;;
+            esac
+        done < <(_color_palette)
+        printf '%s\n' '    esac'
+        printf '%s\n' '  fi'
+        printf '%s\n' '}'
+        printf '%s\n' ''
+        printf '%s\n' 'DIM=$(_clr dim); RESET=$(_clr reset); BOLD=$(_clr bold)'
+        printf '%s\n' 'YELLOW=$(_clr cmd); RED=$(_clr err)'
+        printf '%s\n' 'GRAY=$(_clr meta); GREEN=$(_clr ok); LIGHT_YELLOW=$(_clr dec)'
         printf '%s\n' ''
         declare -f _stream_render
     } > "$_libdir/render.sh"
@@ -1732,7 +1776,26 @@ _emit_request_ui_lib() {
         printf '%s\n' '# Source: bashagt --install or --update'
         printf '%s\n' '# Provides: _req_disp_width, _req_content_line, _request_ui_render, _request_ui, _request_resolve'
         printf '%s\n' ''
-        printf '%s\n' "BOLD=\$'\\033[1m' ; DIM=\$'\\033[2m' ; CYAN=\$'\\033[36m' ; RESET=\$'\\033[0m'"
+        printf '%s\n' '# Inline mode-aware color resolver (mirrors render.sh _clr)'
+        printf '%s\n' '_clr() {'
+        printf '%s\n' '  if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then'
+        printf '%s\n' '    case "$1" in'
+        printf '\t    bold) printf "\\033[1m" ;;\n'
+        printf '\t    dim)  printf "\\033[2m" ;;\n'
+        printf '\t    reset) printf "\\033[0m" ;;\n'
+        printf '\t    cyan) printf "\\033[38;2;86;156;214m" ;;\n'
+        printf '%s\n' '    esac'
+        printf '%s\n' '  else'
+        printf '%s\n' '    case "$1" in'
+        printf '\t    bold) printf "\\033[1m" ;;\n'
+        printf '\t    dim)  printf "\\033[2m" ;;\n'
+        printf '\t    reset) printf "\\033[0m" ;;\n'
+        printf '\t    cyan) printf "\\033[38;2;0;0;255m" ;;\n'
+        printf '%s\n' '    esac'
+        printf '%s\n' '  fi'
+        printf '%s\n' '}'
+        printf '%s\n' ''
+        printf '%s\n' 'BOLD=$(_clr bold); DIM=$(_clr dim); CYAN=$(_clr cyan); RESET=$(_clr reset)'
         printf '%s\n' ''
         declare -f _req_disp_width
         printf '%s\n' ''
@@ -1750,7 +1813,7 @@ _emit_request_ui_lib() {
 # Modes:
 #   "begin"  — first line of a new display: "  content\n" (no \r)
 #   "update" — overwrite current line: "\r  content\033[K"
-#   "end"    — finalize: "\r  \033[90mcontent\033[0m\033[K\n"
+#   "end"    — finalize: "\r  $GRAY"content"$RESET\033[K\n"
 #   "tree_up" — cursor up N lines (for tree re-render)
 #   "tree_line" — single tree line: "\r  content\033[K\n"
 _ui_emit() {
@@ -1759,7 +1822,7 @@ _ui_emit() {
     case "$_mode" in
         begin)  printf '  %s\n' "$_content" >&2 ;;
         update) printf '\r  %s\033[K' "$_content" >&2 ;;
-        end)    printf '\r  \033[90m%s\033[0m\033[K\n' "$_content" >&2 ;;
+        end)    printf '\r  %s%s%s\033[K\n' "$GRAY" "$_content" "$RESET" >&2 ;;
         tree_up)    (( _n > 0 )) && printf '\033[%dA' "$_n" >&2 ;;
         tree_line)  printf '\r  %s\033[K\n' "$_content" >&2 ;;
         *)      printf '  %s\n' "$_content" >&2 ;;
@@ -1825,7 +1888,7 @@ status_done() {
     (( BASHAGT_STREAM_MODE )) && return 0
     local done_label="$1"  # e.g. "think-done" or "stream-done" or "format-done"
     if (( STATUS_ACTIVE )); then
-        printf '\r  \033[90m%s\033[0m\033[K\n' "$done_label" >&2
+        printf '\r  %s%s%s\033[K\n' "$GRAY" "$done_label" "$RESET" >&2
         STATUS_ACTIVE=0
     fi
 }
@@ -3100,7 +3163,6 @@ _init_settings_template() {
   "context_safe_ratio": 75,
   "turn_budget_soft": 96000,
   "turn_budget_hard": 128000,
-  "compress_threshold": 250000,
 
 
   "__________________": "── Network & Proxy ──",
@@ -4103,7 +4165,7 @@ _str_char_display_width() {
 _strip_ansi_sgr() {
     local _s="$1"
     while [[ "$_s" == *$'\033['*'m'* ]]; do
-        _s="${_s%%$'\033['*}${_s#*m}"
+        _s="${_s%%$'\033['*}${_s#*$'\033['*m}"
     done
     printf '%s' "$_s"
 }
@@ -4710,22 +4772,12 @@ _in_submit_flash() {
 
     local _sub_bg _sub_fg
     # Normal mode: blue
-    if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
-        _sub_bg=$'\033[48;2;20;25;55m'
-        _sub_fg=$'\033[38;2;100;170;255m'
-    else
-        _sub_bg=$'\033[48;2;235;240;255m'
-        _sub_fg=$'\033[38;2;40;70;180m'
-    fi
+    _sub_bg="$FLASH_BG"
+    _sub_fg="$FLASH_FG"
     # Safe mode override: warm amber
     if [[ "${BASHAGT_SAFE_MODE:-0}" == "1" ]]; then
-        if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
-            _sub_bg=$'\033[48;2;60;40;15m'
-            _sub_fg=$'\033[38;2;255;200;80m'
-        else
-            _sub_bg=$'\033[48;2;255;245;225m'
-            _sub_fg=$'\033[38;2;180;130;30m'
-        fi
+        _sub_bg="$FLASH_SAFE_BG"
+        _sub_fg="$FLASH_SAFE_FG"
     fi
     local _sub="$_sub_bg$_sub_fg"
 
@@ -5030,9 +5082,9 @@ _input_exit_cleanup() {
 _safe_update_prompt() {
     local _mode="${1:-${BASHAGT_SAFE_MODE:-0}}"
     if [[ "$_mode" == "1" ]]; then
-        _IN_PROMPT=$'  \033[1;93m›\033[0m '
+        _IN_PROMPT="  ${PROMPT_SAFE_ON}›${RESET} "
     else
-        _IN_PROMPT=$'  \033[1;36m›\033[0m '
+        _IN_PROMPT="  ${PROMPT_INPUT}›${RESET} "
     fi
 }
 
@@ -5421,7 +5473,6 @@ load_config() {
         "declare -g _CFG_context_safe_ratio=\($c.context_safe_ratio // "" | sh)",
         "declare -g _CFG_turn_budget_soft=\($c.turn_budget_soft // "" | sh)",
         "declare -g _CFG_turn_budget_hard=\($c.turn_budget_hard // "" | sh)",
-        "declare -g _CFG_compress_threshold=\($c.compress_threshold // "" | sh)",
 
         "declare -g _CFG_connect_timeout=\($c.connect_timeout // "" | sh)",
         "declare -g _CFG_cmd_timeout=\($c.cmd_timeout // "" | sh)",
@@ -5493,7 +5544,6 @@ load_config() {
     BASHAGT_CONNECT_TIMEOUT=$(_get_setting "connect_timeout" "BASHAGT_CONNECT_TIMEOUT" "$DEFAULT_CONNECT_TIMEOUT")
     BASHAGT_CMD_TIMEOUT=$(_get_setting "cmd_timeout" "BASHAGT_CMD_TIMEOUT" "$DEFAULT_CMD_TIMEOUT")
     _set_project_paths  # set BASHAGT_HISTORY_FILE, TODO_FILE, MEM_NET_DIR, COMM_DIR from project dir
-    BASHAGT_COMPRESS_THRESHOLD=$(_get_setting "compress_threshold" "BASHAGT_COMPRESS_THRESHOLD" "$DEFAULT_COMPRESS_THRESHOLD")
     BASHAGT_SYSTEM_PROMPT=$(_get_setting "system_prompt" "BASHAGT_SYSTEM_PROMPT" "$DEFAULT_SYSTEM_PROMPT")
     BASHAGT_SHOW_THINKING=$(_get_setting "show_thinking" "BASHAGT_SHOW_THINKING" "$DEFAULT_SHOW_THINKING")
     BASHAGT_AUTH_HEADER=$(_get_setting "auth_header" "BASHAGT_AUTH_HEADER" "")
@@ -5561,7 +5611,7 @@ load_config() {
             BASHAGT_AUTH_HEADER="x-api-key"; BASHAGT_AUTH_PREFIX=""
         fi
     fi
-    log "DEBUG: [INIT] load_config: model=$BASHAGT_MODEL max_tok=$BASHAGT_MAX_TOKENS thinking=$BASHAGT_THINKING_BUDGET protocol=$BASHAGT_PROTOCOL compress=$BASHAGT_COMPRESS_THRESHOLD"
+    log "DEBUG: [INIT] load_config: model=$BASHAGT_MODEL max_tok=$BASHAGT_MAX_TOKENS thinking=$BASHAGT_THINKING_BUDGET protocol=$BASHAGT_PROTOCOL"
 
     # ── Model profile loading ──
     BASHAGT_COMPRESS_PROFILE=$(_get_setting "compress_profile" "BASHAGT_COMPRESS_PROFILE" "")
@@ -7858,6 +7908,7 @@ ${AGENTS[$name]}"
 
     while true; do
         _sa_iter=$((_sa_iter + 1))
+        log "DEBUG: [AGENT] iter=$_sa_iter name=$name pid=$$"
         request_body=$(build_request_body "$model" "$max_tokens" \
             "$_sa_sys_cc" "$_msgs" "$_sa_tools_cc" "$thinking_budget" "false" "1")
 
@@ -8827,7 +8878,13 @@ _fmt_stream_callback() {
     if command -v jq >/dev/null 2>&1; then
         # jq -j (no trailing newline) + printf X sentinel prevents $() from
         # stripping trailing newlines that are part of the text content.
+        local _data_size=${#_data}
+        if (( _data_size > 10000 )); then
+            log "DEBUG: [FMT] large SSE data size=$_data_size pid=$$"
+        fi
+        log "DEBUG: [FMT] before jq pid=$$"  # if this appears but not "after jq", $() is hung
         _text=$(printf '%s' "$_data" | jq -j '.delta.text // .delta.content // empty' 2>/dev/null; printf 'X')
+        log "DEBUG: [FMT] after jq pid=$$"
         if [[ "$_text" != "X" ]]; then
             _text="${_text%X}"
             _from_jq=1
@@ -12594,7 +12651,7 @@ _safe_diff_awk() {
 
 # ── Simple bash syntax highlighter + layout formatter ──
 _bash_format() {
-    local _text _dark="${BASHAGT_DARK_MODE:-true}" _prog
+    local _text _prog
     if [[ -n "${1:-}" ]]; then
         _text="$1"
     else
@@ -12774,17 +12831,9 @@ _safe_preview_diff() {
 
     while IFS= read -r _line; do
         if [[ "$_line" =~ ^[[:space:]]*[0-9]+\ \+ ]]; then
-            if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
-                printf '  \033[48;2;20;50;30m\033[38;2;87;210;120m%s\033[K\033[0m\r\n' "$_line" > /dev/tty
-            else
-                printf '  \033[48;2;230;255;235m\033[38;2;40;167;69m%s\033[K\033[0m\r\n' "$_line" > /dev/tty
-            fi
+            printf '  %s%s%s\033[K%s\r\n' "$DIFF_ADD_BG" "$DIFF_ADD_FG" "$_line" "$RESET" > /dev/tty
         elif [[ "$_line" =~ ^[[:space:]]*[0-9]+\ - ]]; then
-            if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
-                printf '  \033[48;2;50;18;22m\033[38;2;245;100;110m%s\033[K\033[0m\r\n' "$_line" > /dev/tty
-            else
-                printf '  \033[48;2;255;235;238m\033[38;2;215;58;73m%s\033[K\033[0m\r\n' "$_line" > /dev/tty
-            fi
+            printf '  %s%s%s\033[K%s\r\n' "$DIFF_DEL_BG" "$DIFF_DEL_FG" "$_line" "$RESET" > /dev/tty
         else
             printf '  %s\r\n' "$_line" > /dev/tty
         fi
@@ -13170,13 +13219,13 @@ _request_ui() {
     printf '\033[1A\033[K' > /dev/tty
 
     if (( _selected < 0 )); then
-        printf '\033[93m  cancelled\033[0m\n' > /dev/tty
+        printf '%s  cancelled%s\n' "$LIGHT_YELLOW" "$RESET" > /dev/tty
         printf 'User cancelled the request.\n'
         return 0
     fi
 
     # Echo selected choice in tree-yellow for UI continuity
-    printf '\033[93m  %s\033[0m\n' "${_opt_labels[$_selected]:-ok}" > /dev/tty
+    printf '%s  %s%s\n' "$LIGHT_YELLOW" "${_opt_labels[$_selected]:-ok}" "$RESET" > /dev/tty
 
     _request_resolve "$_selected" _opt_labels
 }
@@ -13695,9 +13744,9 @@ _slash_safe() {
     _safe_update_prompt "$BASHAGT_SAFE_MODE"
 
     if [[ "${BASHAGT_SAFE_MODE:-0}" == "1" ]]; then
-        _stream_emit "text" "$(jq -nc '{content: "  \033[93m◆ Safe mode ON\033[0m — destructive tools require confirmation. Shift+Tab to toggle."}')"
+        _stream_emit "text" "$(jq -nc --arg y "$LIGHT_YELLOW" --arg r "$RESET" '{content: ($y + "◆ Safe mode ON" + $r + " — destructive tools require confirmation. Shift+Tab to toggle.")}')"
     else
-        _stream_emit "text" "$(jq -nc '{content: "  \033[36m◆ Safe mode OFF\033[0m — tools execute directly. Shift+Tab to toggle."}')"
+        _stream_emit "text" "$(jq -nc --arg c "$CYAN" --arg r "$RESET" '{content: ($c + "◆ Safe mode OFF" + $r + " — tools execute directly. Shift+Tab to toggle.")}')"
     fi
 }
 _slash_dark() {
@@ -13719,7 +13768,7 @@ _slash_dark() {
 
     _colors_resolve
 
-    local _dim=$'\033[2m' _rst=$'\033[0m'
+    local _dim="$DIM" _rst="$RESET"
     if [[ "${BASHAGT_DARK_MODE:-true}" != "false" && "${BASHAGT_DARK_MODE:-true}" != "0" ]]; then
         _stream_emit "text" "$(jq -nc --arg d "$_dim" --arg r "$_rst" '{content: ($d + "◆ Dark mode ON" + $r)}')"
     else
@@ -14250,27 +14299,70 @@ run_turn() {
                                     local _pre_cmd; _pre_cmd=$(jq -r '.command // ""' <<< "$tool_input")
                                     local _pre_fmt; _pre_fmt=$(printf '%s' "$_pre_cmd" | _bash_format 2>/dev/null)
                                     if [[ -n "$_pre_fmt" ]]; then
-                                        _stream_emit "text" "$(jq -nc --arg c '──── Script ────' '{content: $c}')" || true
-                                        local _pf_max=30 _pf_i _pf_line _pf_count _pf_total _pf_remaining _pf_head_bytes
-                                        _pf_total=${#_pre_fmt}
+                                        local _pf_max=30 _pf_i _pf_line _pf_count
                                         local -a _pf_lines
                                         mapfile -t _pf_lines <<< "$_pre_fmt"
                                         _pf_count=${#_pf_lines[@]}
-                                        _pf_head_bytes=0
-                                        for ((_pf_i=0; _pf_i<_pf_count; _pf_i++)); do
+
+                                        # ── Phase 1: scan max display width (ANSI-stripped) ──
+                                        local _max_w=0 _bare _w _pf_limit
+                                        _pf_limit=$((_pf_count < _pf_max ? _pf_count : _pf_max))
+                                        for ((_pf_i=0; _pf_i<_pf_limit; _pf_i++)); do
                                             _pf_line="${_pf_lines[_pf_i]}"
                                             [[ -z "$_pf_line" ]] && _pf_line=" "
-                                            if (( _pf_i < _pf_max )); then
-                                                _stream_emit "text" "$(jq -nc --arg c "    $_pf_line" '{content: $c}')" || true
-                                                _pf_head_bytes=$((_pf_head_bytes + ${#_pf_lines[_pf_i]} + 1))
-                                            fi
+                                            _bare=$(_strip_ansi_sgr "$_pf_line")
+                                            _w=${#_bare}
+                                            (( _w > _max_w )) && _max_w=$_w
                                         done
+
+                                        # ── Phase 2: box dimensions (clamp to terminal) ──
+                                        local _box_w _inner _max_disp _term_w=${TERM_WIDTH:-80}
+                                        _box_w=$((_max_w + 6))
+                                        (( _box_w < 14 )) && _box_w=14
+                                        (( _box_w > _term_w - 2 )) && _box_w=$((_term_w - 2))
+                                        _inner=$((_box_w - 2))
+                                        _max_disp=$((_inner - 2))
+
+                                        # ── horizontal fill pool (128 ─) ──
+                                        local _h="────────────────────────────────────────────────────────────────────────────────────────────────"
+                                        local _lty _rst
+                                        _lty="$LIGHT_YELLOW"
+                                        _rst="$RESET"
+
+                                        # ── Phase 3: top border ╭── Script ──...──╮ ──
+                                        local _pad_w=$((_box_w - 14))
+                                        (( _pad_w < 0 )) && _pad_w=0
+                                        _stream_emit "text" "$(jq -nc --arg c "${_lty}╭── Script ──${_h:0:_pad_w}╮${_rst}" '{content: $c}')" || true
+
+                                        # ── Phase 4: content lines │  text  │ ──
+                                        local _disp _disp_w
+                                        for ((_pf_i=0; _pf_i<_pf_limit; _pf_i++)); do
+                                            _pf_line="${_pf_lines[_pf_i]}"
+                                            [[ -z "$_pf_line" ]] && _pf_line=" "
+                                            _bare=$(_strip_ansi_sgr "$_pf_line")
+                                            _w=${#_bare}
+                                            if (( _w > _max_disp )); then
+                                                local _cut=$((_max_disp - 1))
+                                                _disp="${_bare:0:_cut}…"
+                                                _disp_w=$((_cut + 1))
+                                            else
+                                                _disp="$_pf_line"
+                                                _disp_w=$_w
+                                            fi
+                                            _pad_w=$((_box_w - 4 - _disp_w))
+                                            (( _pad_w < 0 )) && _pad_w=0
+                                            local _pad_spaces; printf -v _pad_spaces "%${_pad_w}s" ""
+                                            _stream_emit "text" "$(jq -nc --arg c "${_lty}│${_rst}  ${_disp}${_pad_spaces}${_lty}│${_rst}" '{content: $c}')" || true
+                                        done
+
+                                        # ── truncation notice (if > 30 lines) ──
                                         if (( _pf_count > _pf_max )); then
-                                            _pf_remaining=$((_pf_total - _pf_head_bytes))
-                                            (( _pf_remaining < 0 )) && _pf_remaining=0
-                                            _stream_emit "text" "$(jq -nc --arg c "    ...(${_pf_remaining} more chars)" '{content: $c}')" || true
+                                            local _pf_remaining=$((_pf_count - _pf_max))
+                                            _stream_emit "text" "$(jq -nc --arg c "  ...(${_pf_remaining} more lines)" '{content: $c}')" || true
                                         fi
-                                        _stream_emit "text" "$(jq -nc --arg c '──── End Script ────' '{content: $c}')" || true
+
+                                        # ── Phase 5: bottom border ╰──...──╯ ──
+                                        _stream_emit "text" "$(jq -nc --arg c "${_lty}╰${_h:0:$((_box_w - 2))}╯${_rst}" '{content: $c}')" || true
                                     fi
                                 fi
                                 _stream_emit "tool_start" "$(jq -nc \
@@ -14613,12 +14705,12 @@ print_session_summary() {
 
 print_banner() {
     printf '\n'
-    printf '  \033[1;36m██████╗  █████╗ ███████╗██╗  ██╗ █████╗  ██████╗ ████████╗\033[0m\n'
-    printf '  \033[1;36m██╔══██╗██╔══██╗██╔════╝██║  ██║██╔══██╗██╔════╝ ╚══██╔══╝\033[0m\n'
-    printf '  \033[1;36m██████╔╝███████║███████╗███████║███████║██║  ███╗   ██║\033[0m\n'
-    printf '  \033[1;36m██╔══██╗██╔══██║╚════██║██╔══██║██╔══██║██║   ██║   ██║\033[0m\n'
-    printf '  \033[1;36m██████╔╝██║  ██║███████║██║  ██║██║  ██║╚██████╔╝   ██║\033[0m\n'
-    printf '  \033[1;36m╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝    ╚═╝\033[0m\n'
+    printf '  %s██████╗  █████╗ ███████╗██╗  ██╗ █████╗  ██████╗ ████████╗%s\n' "$BANNER_LOGO_L1" "$RESET"
+    printf '  %s██╔══██╗██╔══██╗██╔════╝██║  ██║██╔══██╗██╔════╝ ╚══██╔══╝%s\n' "$BANNER_LOGO_L2" "$RESET"
+    printf '  %s██████╔╝███████║███████╗███████║███████║██║  ███╗   ██║%s\n' "$BANNER_LOGO_L3" "$RESET"
+    printf '  %s██╔══██╗██╔══██║╚════██║██╔══██║██╔══██║██║   ██║   ██║%s\n' "$BANNER_LOGO_L4" "$RESET"
+    printf '  %s██████╔╝██║  ██║███████║██║  ██║██║  ██║╚██████╔╝   ██║%s\n' "$BANNER_LOGO_L5" "$RESET"
+    printf '  %s╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝    ╚═╝%s\n' "$BANNER_LOGO_L6" "$RESET"
     printf '\n'
 
     local right_col=40 pad_len pad
@@ -14628,26 +14720,26 @@ print_banner() {
     # Line 1: Profile (if active)
     local _disp_prof; _disp_prof=$(_prof_get_field name)
     if [[ "$_disp_prof" != "default" ]]; then
-        printf '  \033[90mProfile:\033[0m %s → %s\n' "$_disp_prof" "$(_prof_get_field model)"
+        printf '  %sProfile:%s %s → %s\n' "$BANNER_LABEL" "$RESET" "$_disp_prof" "$(_prof_get_field model)"
     fi
 
     # Line 2: Model + Thinking
     pad_len=$(( right_col - 5 - 6 - ${#BASHAGT_MODEL} ))  # label="Model:"=6
     (( pad_len < 1 )) && pad_len=1
     printf -v pad '%*s' "$pad_len" ''
-    printf '  \033[90mModel:\033[0m %s%s \033[90mThinking:\033[0m %s\n' \
-        "$BASHAGT_MODEL" "$pad" "$BASHAGT_SHOW_THINKING"
+    printf '  %sModel:%s %s%s %sThinking:%s %s\n' \
+        "$BANNER_LABEL" "$RESET" "$BASHAGT_MODEL" "$pad" "$BANNER_LABEL" "$RESET" "$BASHAGT_SHOW_THINKING"
 
     # Line 3: Endpoint
-    printf '  \033[90mEndpoint:\033[0m %s\n' \
-        "$(echo "$BASHAGT_API_URL" | sed 's|https://||;s|/v1/.*||')"
+    printf '  %sEndpoint:%s %s\n' \
+        "$BANNER_LABEL" "$RESET" "$(echo "$BASHAGT_API_URL" | sed 's|https://||;s|/v1/.*||')"
 
     # Line 3: Author + Version
     pad_len=$(( right_col - 5 - 7 - 5 ))  # label="Author:"=7, value="Lucas"=5
     (( pad_len < 1 )) && pad_len=1
     printf -v pad '%*s' "$pad_len" ''
-    printf '  \033[90mAuthor:\033[0m %s%s \033[90mVersion:\033[0m preview-0.1\n' \
-        "Lucas" "$pad"
+    printf '  %sAuthor:%s %s%s %sVersion:%s preview-0.1\n' \
+        "$BANNER_LABEL" "$RESET" "Lucas" "$pad" "$BANNER_LABEL" "$RESET"
 
     printf '\n'
 }
@@ -14721,6 +14813,7 @@ _stream_wrap_turn() {
     _tm "wrap_turn_start"
     log "DEBUG: STREAM_WRAP input_size=${#_prompt}"
 
+    log "DEBUG: STREAM_WRAP persistent=${_PERSISTENT_RENDERER_PID:-NONE} to_stderr=$_to_stderr fd1=$(readlink /proc/self/fd/1 2>/dev/null || echo ?) fd7=$(readlink /proc/self/fd/7 2>/dev/null || echo ?) fd8=$(readlink /proc/self/fd/8 2>/dev/null || echo ?)"
     if [[ $_to_stderr == "true" && -n "${_PERSISTENT_RENDERER_PID:-}" ]]; then
         # ── Persistent path: reuse FIFO + renderer (interactive mode) ──
         if ! kill -0 "$_PERSISTENT_RENDERER_PID" 2>/dev/null; then
@@ -14814,6 +14907,7 @@ _stream_wrap_turn() {
 
     # Trailing newline for visual separation before next prompt (interactive only)
     [[ $_to_stderr == "true" ]] && printf '\n'
+    log "DEBUG: STREAM_WRAP done persistent=$_persistent fd1=$(readlink /proc/self/fd/1 2>/dev/null || echo ?)"
 }
 
 agent_loop() {
@@ -14856,6 +14950,7 @@ agent_loop() {
     _proc_init || true
     print_banner
     _persistent_renderer_init || true  # one-time FIFO + renderer (survives all turns)
+    log "DEBUG: [FIFO] init done persistent_pid=${_PERSISTENT_RENDERER_PID:-NONE} fifo=${_PERSISTENT_FIFO:-NONE}"
 
     # Command history file (loaded/saved by input layer)
     local cmd_history="$HOME/.bashagt/cmd_history"
@@ -14870,7 +14965,7 @@ agent_loop() {
     }
 
     local user_input rl_prompt
-    rl_prompt=$'  \033[1;36m›\033[0m '
+    rl_prompt="  ${PROMPT_INPUT}›${RESET} "
     _input_init --prompt "$rl_prompt" --history "$cmd_history" --completer _bashagt_complete
 
     # Input-mode Ctrl-C handler — equivalent to /exit
@@ -16517,7 +16612,7 @@ main() {
     # ── Logging subsystem (must precede any log/die calls) ──
     log_init
     _log_enable_err_trap
-    log "DEBUG: [INIT] main: mode=$BASHAGT_MODE project_dir=${BASHAGT_PROJECT_DIR:-} session=$BASHAGT_SESSION_ID pid=$$"
+    log "DEBUG: [INIT] main: mode=$BASHAGT_MODE project_dir=${BASHAGT_PROJECT_DIR:-} session=$BASHAGT_SESSION_ID pid=$$ ppid=$PPID args=$*"
 
     # ── Uninstall: read PID from settings.json, kill, remove ~/.bashagt ──
     if [[ "$BASHAGT_MODE" == "uninstall" ]]; then
