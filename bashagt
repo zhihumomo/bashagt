@@ -3711,7 +3711,7 @@ Before output, verify:
 AGEF
 
         cat > "$HOME/.bashagt/agents/summarize.md" << 'AGEF'
-{"name":"summarize","description":"Summarize files, code, or conversation history concisely","max_tokens":12288,"thinking_budget":0,"tools":["read_file"]}
+{"name":"summarize","description":"Summarize files, code, or conversation history concisely","max_tokens":12288,"thinking_budget":0,"tools":["read_file","bash"]}
 
 You are a content summarization specialist. You distill text into dense, actionable summaries while preserving critical information. READ-ONLY — output the summary, nothing else.
 
@@ -8745,15 +8745,23 @@ _fmt_stream_callback() {
     local _data="$2"
     [[ "$_data" == "{"* ]] || return 0
 
-    local _text=""
-    # Use jq first — handles any JSON field order (Anthropic, BaiLian, etc.)
+    local _text="" _from_jq=0
     if command -v jq >/dev/null 2>&1; then
-        _text=$(printf '%s' "$_data" | jq -r '.delta.text // .delta.content // empty' 2>/dev/null)
+        # jq -j (no trailing newline) + printf X sentinel prevents $() from
+        # stripping trailing newlines that are part of the text content.
+        _text=$(printf '%s' "$_data" | jq -j '.delta.text // .delta.content // empty' 2>/dev/null; printf 'X')
+        if [[ "$_text" != "X" ]]; then
+            _text="${_text%X}"
+            _from_jq=1
+        else
+            _text=""
+        fi
     fi
-    # Fallback: bash substring extraction for environments without jq
-    if [[ -z "$_text" ]] && [[ "$_data" == *'"text":"'* ]]; then
-        _text="${_data##*'"text":"'}"
-        _text="${_text%%'"'*}"
+    if [[ "$_from_jq" == "0" ]]; then
+        [[ "$_data" == *'"delta":{"type":"text_delta","text":"'* ]] || return 0
+        _text="${_data##*'"delta":{"type":"text_delta","text":"'}"
+        [[ "$_text" == "$_data" ]] && return 0
+        _text="${_text%%'"}}'*}"
     fi
     [[ -z "$_text" ]] && return 0
     _json_unescape "$_text" _text
