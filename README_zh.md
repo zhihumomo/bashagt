@@ -806,6 +806,10 @@ cd test
 
 ## 📝 更新日志
 
+### 2026-06-10 — awk 兼容性修复
+
+**🐛 awk 兼容性修复** — 将 `bash_format.awk` 中注释检测的 `match(line, /^([[:space:]]*)(#.*)/, m)` 替换为可移植的 `sub()` 字符串提取方案。`match()` 的第三个数组参数是 GNU awk (gawk) 扩展；新方案兼容所有 awk 实现，包括 macOS 上的 BSD awk。
+
 ### 2026-06-09 — 集中化调色板 & 配置简化
 
 **🎨 集中化调色板** — 所有终端颜色（语法高亮、界面、diff、闪光、banner、提示符）现在统一定义在单个 `_color_palette()` 函数中 — 色系唯一真理来源。新增 `_color_assemble()` 和懒缓存 `_color_get()` + `_CLR_CACHE`，消除了 `_colors_resolve()`、`_bsrp_assemble()`、`_stream_render()`、`_in_submit_flash()`、`_safe_preview_diff()`、`print_banner()`、`_ui_emit()` 等函数中上百行深色/浅色模式的分支重复代码。深色/浅色模式切换现在只需清空缓存，无需重新执行所有颜色分支。新增调色板条目包括 `diff_add_bg`/`diff_add_fg`/`diff_del_bg`/`diff_del_fg`、`flash_bg`/`flash_fg`/`flash_safe_bg`/`flash_safe_fg`、`prompt_input`/`prompt_safe_on`、`banner_logo_L1`–`L6`/`banner_label` 以及多种强调色。
@@ -889,6 +893,12 @@ cd test
 - [jq](https://jqlang.github.io/jq/) — 命令行 JSON 处理器
 - [Termux](https://termux.dev/) — Android 终端环境
 - [iSH](https://ish.app/) — iOS 上的 Linux Shell
+
+---
+
+## 👥 合作者
+
+- **Bashagt Bot** — [bashagt.bot@gmail.com](mailto:bashagt.bot@gmail.com)
 
 ---
 

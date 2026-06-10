@@ -808,6 +808,10 @@ cd test
 
 ## 📝 Changelog
 
+### 2026-06-10 — awk Compatibility Fix
+
+**🐛 awk Compatibility Fix** — Replaced `match(line, /^([[:space:]]*)(#.*)/, m)` with portable `sub()`-based string extraction in `bash_format.awk` comment detection. The `match()` third-argument array is a GNU awk (gawk) extension; the new approach works across all awk implementations including BSD awk on macOS.
+
 ### 2026-06-09 — Centralized Color Palette & Config Simplification
 
 **🎨 Centralized Color Palette** — All terminal colors (syntax highlighting, UI chrome, diff, flash, banners, prompts) now defined in a single `_color_palette()` function — the sole source of truth. New `_color_assemble()` and lazy-cached `_color_get()` with `_CLR_CACHE` eliminate hundreds of lines of duplicated dark/light-mode branching throughout `_colors_resolve()`, `_bsrp_assemble()`, `_stream_render()`, `_in_submit_flash()`, `_safe_preview_diff()`, `print_banner()`, and `_ui_emit()`. Dark/light mode toggle is now a single cache flush instead of re-executing all color branches. Newly introduced palette entries include `diff_add_bg`/`diff_add_fg`/`diff_del_bg`/`diff_del_fg`, `flash_bg`/`flash_fg`/`flash_safe_bg`/`flash_safe_fg`, `prompt_input`/`prompt_safe_on`, `banner_logo_L1`–`L6`/`banner_label`, and accent colors.
@@ -891,6 +895,12 @@ In short: you are free to use, modify, and distribute this code, including for c
 - [jq](https://jqlang.github.io/jq/) — Command-line JSON processor
 - [Termux](https://termux.dev/) — Android terminal environment
 - [iSH](https://ish.app/) — Linux shell on iOS
+
+---
+
+## 👥 Collaborators
+
+- **Bashagt Bot** — [bashagt.bot@gmail.com](mailto:bashagt.bot@gmail.com)
 
 ---
 
