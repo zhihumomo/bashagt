@@ -67,8 +67,9 @@ BEGIN {
     if (indent > 0) { sub(/^[[:space:]]+/, "", line); len = length(line) }
 
     if (line ~ /^[[:space:]]*#/) {
-        match(line, /^([[:space:]]*)(#.*)/, m)
-        out = out m[1] _cmt m[2] _reset
+        m1 = line; sub(/[^[:space:]].*/, "", m1)
+        m2 = line; sub(/^[[:space:]]*/, "", m2)
+        out = out m1 _cmt m2 _reset
         printf "%s\n", out
         prev_cont = 0
         next
