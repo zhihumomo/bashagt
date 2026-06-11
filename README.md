@@ -810,7 +810,7 @@ cd test
 
 ### 2026-06-11 — Table Tool
 
-**📊 Built-in `table` Tool** — New `table()` tool for the format agent: renders aligned box-drawing tables with auto-calculated column widths (min 4, max 45 chars). Supports per-column alignment (left/right/center), CJK/emoji-safe `_str_display_width()` sizing, auto header/separator rows, and terminal-width clamping when total width exceeds `TERM_WIDTH`. BSRP system prompt rules D8, T5, TBL1–TBL7 updated — agents now call `table(columns, align, rows)` instead of hand-drawing box characters. `FORMAT_AGENT_META` now includes `"table"` tool; `dispatch_tool()` routes `table` calls to `tool_table()`.
+**📊 BSRP `<table>` Tag** — Table rendering moved from tool dispatch to inline BSRP postprocessing. Format agent emits `<table>` + `</table>` tags around JSON config (`{"columns":[...],"align":[...],"rows":[...]}`); `_fmt_postprocess()` and `_fmt_postprocess_var()` scan for these blocks during BSRP→ANSI conversion, call `tool_table()` inline, and inject the rendered box-drawing output. `_fmt_init_stream_state()` resets `_FMT_IN_TABLE`/`_FMT_TABLE_BUF` per turn. `FORMAT_AGENT_META` reverts to `"tools":[]` — tables are now markup, not tool calls. Simpler, zero-latency: no dispatch round-trip.
 
 ### 2026-06-11 — awk Formatter && Line-Break & Box Frame Fix
 

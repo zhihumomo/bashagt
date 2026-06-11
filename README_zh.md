@@ -808,7 +808,7 @@ cd test
 
 ### 2026-06-11 — Table 表格工具
 
-**📊 内置 `table` 工具** — 新增 format agent 专用的 `table()` 工具：渲染对齐的制表符表格，自动计算列宽（最小 4，最大 45 字符），支持列对齐（左/右/居中）、CJK/emoji 安全的 `_str_display_width()` 宽度计算、自动表头/分隔行以及总宽超出 `TERM_WIDTH` 时的终端宽度自适应。BSRP 系统提示规则 D8、T5、TBL1–TBL7 全部更新 — 智能体现在调用 `table(columns, align, rows)` 而非手工绘制制表符。`FORMAT_AGENT_META` 纳入 `"table"` 工具；`dispatch_tool()` 将 `table` 调用路由至 `tool_table()`。
+**📊 BSRP `<table>` 标签** — 表格渲染从工具派发移至 BSRP 内联后处理。Format agent 在输出中嵌入 `<table>` + `</table>` 标签包裹 JSON 配置（`{"columns":[...],"align":[...],"rows":[...]}`）；`_fmt_postprocess()` 和 `_fmt_postprocess_var()` 在 BSRP→ANSI 转换时扫描这些块，内联调用 `tool_table()` 并注入渲染后的制表符输出。`_fmt_init_stream_state()` 每轮重置 `_FMT_IN_TABLE`/`_FMT_TABLE_BUF`。`FORMAT_AGENT_META` 回退为 `"tools":[]` — 表格是标记语言而非工具调用。更简洁，零延迟：无需派发往返。
 
 ### 2026-06-11 — awk 格式化 && 换行 & Box 边框修复
 

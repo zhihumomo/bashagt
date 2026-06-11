@@ -8573,9 +8573,11 @@ D6. WARNINGS/CAVEATS: warning→<warn> + ⚠ prefix. See §EMOJI.
 D7. CHANGE SUMMARIES: additions→<ok>+</ok>, deletions→<err>-</err>,
     modifications→<warn>~</warn>. Table if >3 items.
 
-D8. TABULAR DATA: ≥3 items with ≥2 attributes each → use table() tool.
-    Pass columns, align (left/right/center), and rows. DO NOT hand-draw tables.
-    Color VALUES with BSRP tags (e.g. <ok>+ add</ok>) — borders auto-generated.
+D8. TABULAR DATA: ≥3 items with ≥2 attributes each → use <table> tag.
+    <table>
+    {"columns":["Col1","Col2"],"align":["left","right"],"rows":[...]}
+    </table>
+    Color cell VALUES with BSRP tags. DO NOT hand-draw box characters.
 
 D9. EXPLANATORY TEXT: key terms→<b>, files→<path>, tools→<cmd>.
     Short paragraphs (≤120 chars). Break long ones, indent continuation +2.
@@ -8734,14 +8736,16 @@ EM3. USAGE RULES:
 
 ━━━ TABLE RULES ━━━
 
-TBL1. Use table(columns, align, rows) tool — NEVER hand-draw box characters.
-TBL2. columns: header texts (string array). Omit for no header row.
-TBL3. align: "left" (text), "right" (numbers), "center". Default: left.
-TBL4. rows: data cells — each row is a string array.
-TBL5. Color cell VALUES with BSRP tags (<ok>, <err>, <warn>, <path>, <cmd>, <meta>, <b>).
-     Borders and alignment are handled automatically — do NOT color borders.
-TBL6. Min column 4, max 45. Total width auto-clamped to terminal width.
-TBL7. No tables for <4 items with only 1 data column. Use vertical layout instead.
+TBL1. Use <table> tag — NEVER hand-draw box characters.
+     <table>
+     {"columns":["H1","H2"],"align":["left","right"],"rows":[...]}
+     </table>
+TBL2. rows: each row is a string array. Cell values may contain BSRP color tags.
+TBL3. columns: optional header texts (string array). Omit for no header row.
+TBL4. align: "left" (text), "right" (numbers), "center". Default: left.
+TBL5. Min column 4 chars, max 45. Total width auto-clamped to terminal width.
+TBL6. No tables for <4 items with only 1 data column. Use vertical layout instead.
+TBL7. The JSON between <table> and </table> must be valid, single-line-safe JSON.
 
 ━━━ EXAMPLES ━━━
 
@@ -8768,11 +8772,13 @@ Output:
     — or — change port in <path>src/server.py</path>
 
 Input: "Changes: added auth.py, modified config.py, deleted old_parser.py"
-Output (via table tool):
-  table({"columns":["Change","File"],"align":["left","left"],
-         "rows":[["<ok>+ add</ok>","<path>auth.py</path>"],
-                 ["<warn>~ mod</warn>","<path>config.py</path>"],
-                 ["<err>- del</err>","<path>old_parser.py</path>"]]})
+Output:
+  <table>
+  {"columns":["Change","File"],"align":["left","left"],
+   "rows":[["<ok>+ add</ok>","<path>auth.py</path>"],
+           ["<warn>~ mod</warn>","<path>config.py</path>"],
+           ["<err>- del</err>","<path>old_parser.py</path>"]]}
+  </table>
 
 Input: "Setup: 1. Clone repo 2. pip install -r requirements.txt 3. Copy
        .env.example to .env 4. Run python3 main.py"
@@ -8804,11 +8810,29 @@ E9. Emoji width: pictograph emoji (📄📁🔍💡⭐🐛🔧📝🚀⏳📊�
 AGEF
 BSRP_TEMPLATE="$FORMAT_AGENT_BODY"
 _bsrp_assemble  # fill __COLOR_SECTION__ with active mode
-FORMAT_AGENT_META='{"name":"format","description":"bashagt Standard Rendering Protocol engine","max_tokens":32768,"thinking_budget":0,"tools":["table"]}'
+FORMAT_AGENT_META='{"name":"format","description":"bashagt Standard Rendering Protocol engine","max_tokens":32768,"thinking_budget":0,"tools":[]}'
 
 # Convert BSRP semantic tags to ANSI. <code> blocks pass through unchanged.
 _fmt_postprocess() {
     local _esc; _esc=$'\033'
+    # Phase 1: render <table> blocks (multi-line aware)
+    local _input; _input=$(dd bs=1048576 count=1 2>/dev/null)
+    local _output="" _in_table=0 _table_json="" _line
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        if [[ "$_line" == "<table>" ]]; then
+            _in_table=1; _table_json=""; continue
+        elif [[ "$_line" == "</table>" ]]; then
+            _in_table=0
+            _output+=$(tool_table "$_table_json")$'\n'
+            continue
+        fi
+        if (( _in_table )); then
+            _table_json+="$_line"
+            continue
+        fi
+        _output+="$_line"$'\n'
+    done <<< "$_input"
+    # Phase 2: BSRP tag → ANSI conversion
     sed \
         -e "s|"$'\r'"||g" \
         -e "s|\\\\033|$_esc|g" \
@@ -8823,12 +8847,28 @@ _fmt_postprocess() {
         -e "s|<meta>|${META_COLOR}|g" \
         -e "s|<sel>|${SEL_COLOR}|g" \
         -e "s|<var>|${VAR}|g" \
-        -e "s|</\(b\|dim\|ok\|err\|warn\|path\|cmd\|meta\|sel\|var\)>|${RESET}|g"
+        -e "s|</\(b\|dim\|ok\|err\|warn\|path\|cmd\|meta\|sel\|var\)>|${RESET}|g" <<< "$_output"
 }
 
 # Fork-free variant.
 _fmt_postprocess_var() {
     local _s="$1" _outvar="$2" _esc; _esc=$'\033'
+    # <table> buffering: accumulate lines between <table> and </table>
+    if [[ "${_FMT_IN_TABLE:-0}" == "1" ]]; then
+        if [[ "$_s" == "</table>" ]]; then
+            _FMT_IN_TABLE=0
+            _s=$(tool_table "${_FMT_TABLE_BUF:-}")
+            _FMT_TABLE_BUF=""
+        else
+            _FMT_TABLE_BUF+="$_s"
+            printf -v "$_outvar" '%s' ""
+            return 0
+        fi
+    elif [[ "$_s" == "<table>" ]]; then
+        _FMT_IN_TABLE=1; _FMT_TABLE_BUF=""
+        printf -v "$_outvar" '%s' ""
+        return 0
+    fi
     _s="${_s//$'\r'/}"
     _s="${_s//\\033/$_esc}"
     _s="${_s//<code>/}"; _s="${_s//<\/code>/}"
@@ -9043,6 +9083,8 @@ ${raw}
     _FMT_OUTFD="$_fd"
     _FMT_PREFIX="${prefix:-}"
     _FMT_SPIN_TICK_CNT=0
+    _FMT_IN_TABLE=0
+    _FMT_TABLE_BUF=""
 
     # ── Spinner tick for SSE polling phase (keeps timer alive during format HTTP) ──
     _fmt_spin_tick() {
