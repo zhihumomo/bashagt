@@ -806,9 +806,9 @@ cd test
 
 ## 📝 更新日志
 
-### 2026-06-11 — Table 表格工具
+### 2026-06-11 — Table 工具回退
 
-**📊 BSRP `<table>` 标签** — 表格渲染从工具派发移至 BSRP 内联后处理。Format agent 在输出中嵌入 `<table>` + `</table>` 标签包裹 JSON 配置（`{"columns":[...],"align":[...],"rows":[...]}`）；`_fmt_postprocess()` 和 `_fmt_postprocess_var()` 在 BSRP→ANSI 转换时扫描这些块，内联调用 `tool_table()` 并注入渲染后的制表符输出。`_fmt_init_stream_state()` 每轮重置 `_FMT_IN_TABLE`/`_FMT_TABLE_BUF`。`FORMAT_AGENT_META` 回退为 `"tools":[]` — 表格是标记语言而非工具调用。更简洁，零延迟：无需派发往返。
+**↩️ Table 工具移除** — 回退 `table()` 工具和 `<table>` BSRP 标签基础设施。`tool_table()`（130 行）、`TOOL_TABLE_SCHEMA`、`_fmt_postprocess()`/`_fmt_postprocess_var()` 中的 `<table>` 缓冲以及 `dispatch_tool()` 路由全部移除。BSRP 规则 D8、T5、TBL1–TBL7 恢复为手工绘制制表符。`test/test_tool_table.sh` 删除。理由：BSRP 标记方式增加了复杂度但收益不足；手工绘制表格对 format agent 而言更简单灵活。
 
 ### 2026-06-11 — awk 格式化 && 换行 & Box 边框修复
 

@@ -808,9 +808,9 @@ cd test
 
 ## 📝 Changelog
 
-### 2026-06-11 — Table Tool
+### 2026-06-11 — Table Tool Reverted
 
-**📊 BSRP `<table>` Tag** — Table rendering moved from tool dispatch to inline BSRP postprocessing. Format agent emits `<table>` + `</table>` tags around JSON config (`{"columns":[...],"align":[...],"rows":[...]}`); `_fmt_postprocess()` and `_fmt_postprocess_var()` scan for these blocks during BSRP→ANSI conversion, call `tool_table()` inline, and inject the rendered box-drawing output. `_fmt_init_stream_state()` resets `_FMT_IN_TABLE`/`_FMT_TABLE_BUF` per turn. `FORMAT_AGENT_META` reverts to `"tools":[]` — tables are now markup, not tool calls. Simpler, zero-latency: no dispatch round-trip.
+**↩️ Table Tool Removed** — Reverted the `table()` tool and `<table>` BSRP tag infrastructure. `tool_table()` (130 lines), `TOOL_TABLE_SCHEMA`, `<table>` buffering in `_fmt_postprocess()`/`_fmt_postprocess_var()`, and `dispatch_tool()` routing all removed. BSRP rules D8, T5, TBL1–TBL7 restored to original hand-drawn box-character tables. `test/test_tool_table.sh` deleted. Rationale: BSRP markup approach added complexity without sufficient benefit; hand-drawn tables remain simpler and more flexible for the format agent.
 
 ### 2026-06-11 — awk Formatter && Line-Break & Box Frame Fix
 
