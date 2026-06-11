@@ -12689,7 +12689,7 @@ BEGIN { kw["if"]=1; kw["then"]=1; kw["else"]=1; kw["elif"]=1; kw["fi"]=1
     fn["more"]=1; fn["less"]=1; fn["vi"]=1; fn["vim"]=1; fn["nano"]=1
 }
 {
-    line = $0; out = ""; state = 0; i = 1; len = length(line)
+    line = $0; out = ""; state = 0; i = 1; len = length(line); _and_count = 0
     was_cont = (FNR > 1 && prev_cont)
     if (was_cont) { indent = prev_base + 3 }
     else          { indent = 0; prev_base = 0 }
@@ -12721,6 +12721,20 @@ BEGIN { kw["if"]=1; kw["then"]=1; kw["else"]=1; kw["elif"]=1; kw["fi"]=1
                 out = out ";"; i++
                 while (i <= len && substr(line, i, 1) == " ") i++
                 out = out "\n"; continue
+            }
+        }
+        # && line-break: 3rd+ && wraps with \ (state 0, not inside strings)
+        if (ch == "&" && i < len && substr(line, i+1, 1) == "&") {
+            _and_count++
+            if (_and_count >= 3) {
+                out = out " \\"; i += 2
+                while (i <= len && substr(line, i, 1) == " ") i++
+                out = out "\n    && "
+                continue
+            } else {
+                out = out "&& "; i += 2
+                while (i <= len && substr(line, i, 1) == " ") i++
+                continue
             }
         }
         if (ch == "$") {
@@ -14324,13 +14338,11 @@ run_turn() {
                                         _inner=$((_box_w - 2))
                                         _max_disp=$((_inner - 2))
 
-                                        # ── horizontal fill pool (128 ─) ──
-                                        local _h="────────────────────────────────────────────────────────────────────────────────────────────────"
+                                        # ── Phase 3: top border ╭── Script ──...──╮ ──
                                         local _lty _rst
                                         _lty="$LIGHT_YELLOW"
                                         _rst="$RESET"
-
-                                        # ── Phase 3: top border ╭── Script ──...──╮ ──
+                                        local _h; printf -v _h "%${_box_w}s" ""; _h="${_h// /─}"
                                         local _pad_w=$((_box_w - 14))
                                         (( _pad_w < 0 )) && _pad_w=0
                                         _stream_emit "text" "$(jq -nc --arg c "${_lty}╭── Script ──${_h:0:_pad_w}╮${_rst}" '{content: $c}')" || true

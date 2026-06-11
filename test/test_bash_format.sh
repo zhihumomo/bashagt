@@ -69,4 +69,31 @@ echo "=== Phase 3: Stress ==="
 (echo 'x=0'; for i in {1..50}; do echo "x=\$((x + $i))"; echo "echo \$x"; done) | check_raw S03 "50 arithmetic"
 
 echo ""
+echo "=== Phase 4: && line-breaking (3rd+ && wrapped with \\) ==="
+
+# 2 && → no wrap
+echo 'cmd1 && cmd2'                                  | check_pipe A01 "two ands"
+
+# 3 && → wrap at 3rd
+echo 'cmd1 && cmd2 && cmd3 && cmd4'                 | check_pipe A02 "four ands"
+
+# 5 && → wrap 3rd, 4th, 5th
+echo 'cmd1 && cmd2 && cmd3 && cmd4 && cmd5'         | check_pipe A03 "five ands"
+
+# Mixed with ; — && count continues across ; break
+echo 'cmd1 && cmd2; cmd3 && cmd4 && cmd5 && cmd6'   | check_pipe A04 "mixed semi-and"
+
+# && inside string → not counted
+echo 'echo "a && b" && cmd1 && cmd2 && cmd3 && cmd4' | check_pipe A05 "and in string"
+
+# Real-world apt chain
+echo 'apt update && apt upgrade && apt autoremove && snap refresh && flatpak update' | check_pipe A06 "apt chain"
+
+# Single & (background) should not trigger
+echo 'cmd1 & cmd2 && cmd3 && cmd4 && cmd5'          | check_pipe A07 "bg and"
+
+# &> redirection should not trigger
+echo 'cmd &>/dev/null && cmd2 && cmd3 && cmd4'      | check_pipe A08 "redirect and"
+
+echo ""
 echo "Total tests: $TNUM"

@@ -57,7 +57,7 @@ BEGIN {
 }
 
 {
-    line = $0; out = ""; state = 0; i = 1; len = length(line)
+    line = $0; out = ""; state = 0; i = 1; len = length(line); _and_count = 0
 
     was_cont = (FNR > 1 && prev_cont)
     if (was_cont) { indent = prev_base + 3 }
@@ -108,6 +108,20 @@ BEGIN {
         }
 
         # --- Variable: $VAR, ${VAR}, $@, $#, $?, $$, $!, $0-$9, $-
+        # && line-break: 3rd+ && wraps with \ (state 0, not inside strings)
+        if (ch == "&" && i < len && substr(line, i+1, 1) == "&") {
+            _and_count++
+            if (_and_count >= 3) {
+                out = out " \\"; i += 2
+                while (i <= len && substr(line, i, 1) == " ") i++
+                out = out "\n    && "
+                continue
+            } else {
+                out = out "&& "; i += 2
+                while (i <= len && substr(line, i, 1) == " ") i++
+                continue
+            }
+        }
         if (ch == "$") {
             rest = substr(line, i); vlen = 0
             if (rest ~ /^\$\{[^}]*\}/)      { vlen = index(rest, "}") + 1 }

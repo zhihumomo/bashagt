@@ -9,13 +9,7 @@ shopt -s extglob
 # ══════════════════════════════════════════════════════════════
 # Minimal _strip_ansi (same logic as bashagt _strip_ansi_sgr)
 # ══════════════════════════════════════════════════════════════
-_strip_ansi() {
-    local _s="$1"
-    while [[ "$_s" == *$'\033['*'m'* ]]; do
-        _s="${_s%%$'\033['*}${_s#*m}"
-    done
-    printf '%s' "$_s"
-}
+_strip_ansi() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
 
 # ══════════════════════════════════════════════════════════════
 # Mock _stream_emit — capture text events
@@ -62,7 +56,7 @@ _run_box() {
     _inner=$((_box_w - 2))
     _max_disp=$((_inner - 2))
 
-    local _h="────────────────────────────────────────────────────────────────────────────────────────────────"
+    local _h; printf -v _h "%${_box_w}s" ""; _h="${_h// /─}"
     local _lty=$'\033[93m' _rst=$'\033[0m'
 
     # Phase 3: top border
@@ -448,6 +442,105 @@ _test_stress5() {
     (( _rc == 0 )) && _ok || _bad "w=$_w rc=$_rc"
 }
 _it "6 terminal widths (30-120): box within bounds"; _test_stress5
+
+# ══════════════════════════════════════════════════════════════
+# Phase 8: Wide-terminal border width consistency (regression for 96-char pool bug)
+# ══════════════════════════════════════════════════════════════
+
+_desc "Wide-terminal border width consistency"
+
+_test_wb1() {
+    # Stress: 20 terminal widths × 3 content lengths = 60 combinations
+    local _w _c _rc=0 _content _top _bot _bare_top _bare_bot
+    for _c in 40 120 220; do
+        _content=$(printf 'echo "%s"' "$(printf "%0${_c}s" 'x')")
+        for _w in 40 60 80 100 120 140 160 180 200; do
+            _run_box "$_content" "$_w" || { _rc=1; break 2; }
+            _top="${BOX_EVENTS[0]}"; _bot="${BOX_EVENTS[-1]}"
+            _bare_top=$(_vis "$_top"); _bare_bot=$(_vis "$_bot")
+            if [[ ${#_bare_top} -ne ${#_bare_bot} ]]; then
+                _rc=2; break 2
+            fi
+        done
+    done
+    (( _rc == 0 )) && _ok || _bad "c=$_c w=$_w top=${#_bare_top} bot=${#_bare_bot} rc=$_rc"
+}
+_it "20 widths × 3 contents: top/bottom always equal"; _test_wb1
+
+_test_wb2() {
+    # Wide terminals with long content — the exact scenario that broke the 96-char pool
+    local _w _top _bot _bare_top _bare_bot _rc=0
+    for _w in 130 140 160 180 200 240 280 320; do
+        local _content; _content=$(printf 'echo "%s"' "$(printf "%0$((_w + 10))s" 'x')")
+        _run_box "$_content" "$_w" || { _rc=1; break; }
+        _top="${BOX_EVENTS[0]}"; _bot="${BOX_EVENTS[-1]}"
+        _bare_top=$(_vis "$_top"); _bare_bot=$(_vis "$_bot")
+        if [[ ${#_bare_top} -ne ${#_bare_bot} ]]; then
+            _rc=2; break
+        fi
+        # Box should be exactly term_w - 2 (clamped)
+        local _expected=$((_w - 2))
+        if [[ ${#_bare_top} -ne $_expected ]]; then
+            _rc=3; break
+        fi
+    done
+    (( _rc == 0 )) && _ok || _bad "w=$_w top=${#_bare_top} expected=$_expected rc=$_rc"
+}
+_it "8 wide terminals (130-320): clamped to TERM-2, borders equal"; _test_wb2
+
+_test_wb3() {
+    # Every content line width = box frame width
+    local _content; _content=$(printf 'echo "%s"' "$(printf "%0200s" 'x')")
+    _run_box "$_content" 200 || { _bad "run failed"; return; }
+    local _i _l _bare _bare_top _bare_bot _rc=0 _box_w
+    _bare_top=$(_vis "${BOX_EVENTS[0]}"); _box_w=${#_bare_top}
+    for ((_i=1; _i<${#BOX_EVENTS[@]}-1; _i++)); do
+        _l="${BOX_EVENTS[$_i]}"
+        # skip truncation notice
+        [[ "$_l" == "  ..."* ]] && continue
+        _bare=$(_vis "$_l")
+        if [[ ${#_bare} -ne $_box_w ]]; then
+            _rc=1; break
+        fi
+    done
+    _bare_bot=$(_vis "${BOX_EVENTS[-1]}")
+    [[ $_rc -eq 0 && ${#_bare_bot} -eq $_box_w ]] && _ok || _bad "i=$_i line_w=${#_bare} box_w=$_box_w"
+}
+_it "all content lines same width as borders"; _test_wb3
+
+_test_wb4() {
+    # Rapid-fire: 200 random-sized boxes, all borders consistent
+    local _i _w _c _rc=0 _top _bot _bare_top _bare_bot
+    for ((_i=0; _i<200; _i++)); do
+        _c=$(( RANDOM % 300 + 5 ))
+        _w=$(( RANDOM % 300 + 30 ))
+        local _content; _content=$(printf 'echo "%s"' "$(printf "%0${_c}s" 'x')")
+        _run_box "$_content" "$_w" || { _rc=1; break; }
+        _top="${BOX_EVENTS[0]}"; _bot="${BOX_EVENTS[-1]}"
+        _bare_top=$(_vis "$_top"); _bare_bot=$(_vis "$_bot")
+        if [[ ${#_bare_top} -ne ${#_bare_bot} ]]; then
+            _rc=2; break
+        fi
+    done
+    (( _rc == 0 )) && _ok || _bad "i=$_i c=$_c w=$_w rc=$_rc"
+}
+_it "200 random boxes: top/bottom always equal"; _test_wb4
+
+_test_wb5() {
+    # Minimal content on ultra-wide terminal
+    local _w _top _bot _bare_top _bare_bot _rc=0
+    for _w in 200 300 400 500; do
+        _run_box "x" "$_w" || { _rc=1; break; }
+        _top="${BOX_EVENTS[0]}"; _bot="${BOX_EVENTS[-1]}"
+        _bare_top=$(_vis "$_top"); _bare_bot=$(_vis "$_bot")
+        # box_w=14 min, both should be 14
+        if [[ ${#_bare_top} -ne 14 || ${#_bare_bot} -ne 14 ]]; then
+            _rc=2; break
+        fi
+    done
+    (( _rc == 0 )) && _ok || _bad "w=$_w top=${#_bare_top} bot=${#_bare_bot} rc=$_rc"
+}
+_it "min content ultra-wide (200-500): box_w=14 stable"; _test_wb5
 
 # ══════════════════════════════════════════════════════════════
 # Summary
