@@ -12723,19 +12723,13 @@ BEGIN { kw["if"]=1; kw["then"]=1; kw["else"]=1; kw["elif"]=1; kw["fi"]=1
                 out = out "\n"; continue
             }
         }
-        # && line-break: 3rd+ && wraps with \ (state 0, not inside strings)
+        # && line-break: every && wraps with \ (state 0, not inside strings)
         if (ch == "&" && i < len && substr(line, i+1, 1) == "&") {
             _and_count++
-            if (_and_count >= 3) {
-                out = out " \\"; i += 2
-                while (i <= len && substr(line, i, 1) == " ") i++
-                out = out "\n    && "
-                continue
-            } else {
-                out = out "&& "; i += 2
-                while (i <= len && substr(line, i, 1) == " ") i++
-                continue
-            }
+            out = out "&& \\"; i += 2
+            while (i <= len && substr(line, i, 1) == " ") i++
+            out = out "\n    "
+            continue
         }
         if (ch == "$") {
             rest = substr(line, i); vlen = 0

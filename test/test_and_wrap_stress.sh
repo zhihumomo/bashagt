@@ -1,34 +1,31 @@
 #!/usr/bin/env bash
 # test_and_wrap_stress.sh — Stress tests for && line-breaking in _bash_format()
+# Rule: every && wraps with \ (each continuation line has at most 1 &&)
 set -euo pipefail
 
 AWK="${AWK:-test/bash_format.awk}"
+export AWK
 PASS=0; FAIL=0; TNUM=0
 
-# ── Test helpers ──
 check() {
-    local name="$1" desc="$2" expected_lines="$3"
+    local name="$1" desc="$2" expected_lines="$3" input="$4"
     TNUM=$((TNUM+1))
-    local output; output=$(printf '%s\n' "$4" | awk -v dark=1 -f "$AWK" 2>&1)
-    local rc=$? lines
-    lines=$(printf '%s\n' "$output" | wc -l)
+    local output; output=$(printf '%s\n' "$input" | awk -v dark=1 -f "$AWK" 2>&1)
+    local lines; lines=$(printf '%s\n' "$output" | wc -l)
     if [[ "$lines" == "$expected_lines" ]]; then
         PASS=$((PASS+1))
         echo "  ✓ $name — $desc (lines=$lines)"
     else
         FAIL=$((FAIL+1))
         echo "  ✗ $name — $desc (expected $expected_lines lines, got $lines)"
-        echo "    output:"
-        printf '%s\n' "$output" | sed 's/^/      /'
+        printf '%s\n' "$output" | sed 's/^/    /'
     fi
 }
 
-# Run awk, verify output contains expected count of backslash-continuations
 check_wraps() {
-    local name="$1" desc="$2" expected_wraps="$3"
+    local name="$1" desc="$2" expected_wraps="$3" input="$4"
     TNUM=$((TNUM+1))
-    local output; output=$(printf '%s\n' "$4" | awk -v dark=1 -f "$AWK" 2>&1)
-    # Count lines ending with \
+    local output; output=$(printf '%s\n' "$input" | awk -v dark=1 -f "$AWK" 2>&1)
     local wraps; wraps=$(printf '%s\n' "$output" | grep -c '\\$' || true)
     if [[ "$wraps" == "$expected_wraps" ]]; then
         PASS=$((PASS+1))
@@ -36,118 +33,113 @@ check_wraps() {
     else
         FAIL=$((FAIL+1))
         echo "  ✗ $name — $desc (expected $expected_wraps wraps, got $wraps)"
-        echo "    output:"
-        printf '%s\n' "$output" | sed 's/^/      /'
+        printf '%s\n' "$output" | sed 's/^/    /'
+    fi
+}
+
+verify_and_count() {
+    local name="$1" n_and="$2" input="$3"
+    TNUM=$((TNUM+1))
+    local output; output=$(printf '%s\n' "$input" | awk -v dark=1 -f "$AWK" 2>&1)
+    local out_ands; out_ands=$(printf '%s\n' "$output" | grep -o '&&' | wc -l)
+    local wraps; wraps=$(printf '%s\n' "$output" | grep -c '\\$' || true)
+    # Every && wraps → wraps == n_and
+    local expected_wraps=$n_and
+    local _errs=0
+    [[ "$out_ands" == "$n_and" ]] || { _errs=$((_errs+1)); echo "    AND MISMATCH: expected $n_and &&, got $out_ands"; }
+    [[ "$wraps" == "$expected_wraps" ]] || { _errs=$((_errs+1)); echo "    WRAP MISMATCH: expected $expected_wraps wraps, got $wraps"; }
+    if [[ $_errs -eq 0 ]]; then
+        PASS=$((PASS+1))
+        echo "  ✓ $name: $n_and && → $wraps wraps (all && preserved)"
+    else
+        FAIL=$((FAIL+1))
+        echo "  ✗ $name FAILED"
+        printf '%s\n' "$output" | sed 's/^/    /'
     fi
 }
 
 echo "=== Phase 1: Long && chains ==="
 echo ""
 
-# 10 commands, 9 &&
 _long9=""; for ((i=1; i<=10; i++)); do [[ -n "$_long9" ]] && _long9+=" && "; _long9+="cmd$i"; done
-check A01 "9 ands — 7 wraps (3rd..9th)" 8 "$_long9"
-
-# 20 commands, 19 &&
+check A01 "9 ands — 9 wraps" 10 "$_long9"
 _long19=""; for ((i=1; i<=20; i++)); do [[ -n "$_long19" ]] && _long19+=" && "; _long19+="cmd$i"; done
-check A02 "19 ands — 17 wraps (3rd..19th)" 18 "$_long19"
-
-# 50 commands, 49 &&
+check A02 "19 ands — 19 wraps" 20 "$_long19"
 _long49=""; for ((i=1; i<=50; i++)); do [[ -n "$_long49" ]] && _long49+=" && "; _long49+="cmd$i"; done
-check A03 "49 ands — 47 wraps (3rd..49th)" 48 "$_long49"
-
-# 100 commands, 99 &&
+check A03 "49 ands — 49 wraps" 50 "$_long49"
 _long99=""; for ((i=1; i<=100; i++)); do [[ -n "$_long99" ]] && _long99+=" && "; _long99+="cmd$i"; done
-check A04 "99 ands — 97 wraps (3rd..99th)" 98 "$_long99"
+check A04 "99 ands — 99 wraps" 100 "$_long99"
 
 echo ""
 echo "=== Phase 2: Mixed && with ; ==="
 echo ""
 
-# 3 ; breaks, each with 2 && (total 6 && across line, wraps at 3rd && overall)
-check A05 "3 semis × 2 ands each — 4 ands total, wraps at 3rd/4th" 6 \
+# ; breaks insert newlines too. 4 && + 3 ; = 7 extra lines → 8 total
+check A05 "3 semis × 2 ands each — 4 ands total" 8 \
     "cmd1 && cmd2; cmd3 && cmd4; cmd5 && cmd6; cmd7 && cmd8"
-
-# Alternating ; and &&
-check A06 "; && ; && ; && pattern" 5 \
+# 3 && + 3 ; = 6 extra → 7 total
+check A06 "; && ; && ; && pattern" 7 \
     "echo one; echo two && echo three; echo four && echo five; echo six && echo seven"
-
-# Dense: many ; and && intermixed
-_dense="a1 && a2; b1 && b2 && b3 && b4; c1 && c2 && c3; d1 && d2 && d3 && d4 && d5"
-check A07 "dense ; + && mix" 12 "$_dense"
+# a: 1 &&, b: 3 &&, c: 2 &&, d: 4 && = 10 && + 3 ; = 13 extra → 14 total
+check A07 "dense ; + && mix" 14 \
+    "a1 && a2; b1 && b2 && b3 && b4; c1 && c2 && c3; d1 && d2 && d3 && d4 && d5"
 
 echo ""
 echo "=== Phase 3: && inside strings (must NOT count) ==="
 echo ""
 
-check A08 "quoted ands not counted, 4 real ands → 2 wraps" 4 \
+# echo→cmd1→cmd2→cmd3→cmd4→cmd5 = 5 real && → 6 lines
+check A08 "quoted ands not counted, 5 real ands" 6 \
     'echo "a && b && c && d" && cmd1 && cmd2 && cmd3 && cmd4 && cmd5'
-
-check A09 "sq and dq mix with ands inside" 4 \
+# echo→printf→c1→c2→c3→c4 = 5 && → 6 lines
+check A09 "sq and dq mix with ands inside" 6 \
     "echo 'x && y' && printf \"a && b\" && cmd1 && cmd2 && cmd3 && cmd4"
-
-check A10 "ands inside backticks (state 0, counted correctly)" 5 \
+# backticks: 3 inside + 4 outside = 7 && → 8 lines
+check A10 "ands inside backticks (counted, state 0)" 7 \
     'result=`cmd1 && cmd2 && cmd3` && cmd4 && cmd5 && cmd6 && cmd7'
-
-check A11 "ands inside \$() (state 0, counted correctly)" 5 \
+# $(): 2 inside + 4 outside = 6 && → 7 lines
+check A11 "ands inside \$() (counted, state 0)" 7 \
     'result=$(cmd1 && cmd2 && cmd3) && cmd4 && cmd5 && cmd6 && cmd7'
 
 echo ""
 echo "=== Phase 4: Edge cases ==="
 echo ""
 
-# Exactly 2 && — no wrap
-check A12 "exactly 2 ands — no wrap" 1 "cmd1 && cmd2 && cmd3"
-
-# Exactly 3 && — wrap at 3rd
-check A13 "exactly 3 ands — wrap 3rd" 2 "cmd1 && cmd2 && cmd3 && cmd4"
-
-# Single & (background) mixed with &&
-check A14 "bg & mixed with && chains" 3 \
+check A12 "exactly 2 ands" 3 "cmd1 && cmd2 && cmd3"
+check A13 "exactly 3 ands" 4 "cmd1 && cmd2 && cmd3 && cmd4"
+# 1 single & (not &&) + 4 && → 5 lines
+check A14 "bg & mixed with && chains" 5 \
     "cmd1 & cmd2 && cmd3 && cmd4 && cmd5 && cmd6"
-
-# &> redirection with &&
-check A15 "&> redirect with && chains" 3 \
+check A15 "&> redirect with && chains" 5 \
     "cmd1 &>/dev/null && cmd2 && cmd3 && cmd4 && cmd5"
-
-# >& redirection with &&
-check A16 ">& redirect with && chains" 3 \
+check A16 ">& redirect with && chains" 5 \
     "cmd1 >&2 && cmd2 && cmd3 && cmd4 && cmd5"
-
-# && at very start of line (after indent)
-check A17 "&& at line start (continuation from prev line)" 4 \
+# && at line start: 5 && → 6 lines (first && wraps too)
+check A17 "&& at line start (continuation from prev line)" 6 \
     "    && cmd2 && cmd3 && cmd4 && cmd5 && cmd6"
-
-# Empty commands between &&
-check A18 "empty between ands" 3 "a && b && c && d && e"
+check A18 "empty between ands" 5 "a && b && c && d && e"
 
 echo ""
 echo "=== Phase 5: Real-world patterns ==="
 echo ""
 
-check B01 "apt full system update chain" 5 \
+check B01 "apt full system update chain" 7 \
     "apt update && apt upgrade -y && apt dist-upgrade -y && apt autoremove --purge -y && apt autoclean && snap refresh && flatpak update -y"
-
-check B02 "docker build && push && deploy" 3 \
+check B02 "docker build && push && deploy" 5 \
     "docker build -t app . && docker tag app:latest app:v2 && docker push app:v2 && kubectl apply -f deploy.yaml && kubectl rollout status deploy/app"
-
-check B03 "git workflow chain" 4 \
+check B03 "git workflow chain" 6 \
     "git add -A && git commit -m 'fix' && git pull --rebase && git push && git tag v1.0 && git push --tags"
-
-check B04 "npm/node toolchain" 4 \
+check B04 "npm/node toolchain" 6 \
     "npm ci && npm run lint && npm run test && npm run build && npm run deploy && npx sentry-cli releases new v1"
-
-check B05 "python data pipeline" 4 \
+check B05 "python data pipeline" 6 \
     "python fetch_data.py && python clean.py && python transform.py && python analyze.py && python visualize.py && python deploy_report.py"
-
-check B06 "systemd service restart chain" 3 \
+check B06 "systemd service restart chain" 5 \
     "systemctl stop app && systemctl daemon-reload && systemctl start app && systemctl status app && journalctl -u app -n 20"
 
 echo ""
 echo "=== Phase 6: Throughput (many lines) ==="
 echo ""
 
-# Generate 500 mixed lines
 _thru=""
 for ((_i=0; _i<500; _i++)); do
     case $((_i % 6)) in
@@ -167,37 +159,8 @@ echo "  ✓ throughput: 500 mixed lines → $_lines output lines in ${_elapsed}m
 PASS=$((PASS+1))
 
 echo ""
-echo "=== Phase 7: Correctness — verify && count per line ==="
+echo "=== Phase 7: Correctness — every && preserved + wraps == n_and ==="
 echo ""
-
-# Verify that a line with N && operators produces correct output:
-# First 2 && keep inline, 3rd+ gets wrapped (1 wrap per && beyond 2nd)
-# So for N &&: wraps = max(0, N-2), output lines = wraps + 1
-verify_and_count() {
-    local name="$1" n_and="$2" input="$3"
-    TNUM=$((TNUM+1))
-    local output; output=$(printf '%s\n' "$input" | awk -v dark=1 -f "$AWK" 2>&1)
-    # Count && in output (all lines)
-    local out_ands; out_ands=$(printf '%s\n' "$output" | grep -o '&&' | wc -l)
-    # Count \ at end of lines (wraps)
-    local wraps; wraps=$(printf '%s\n' "$output" | grep -c '\\$' || true)
-    local expected_wraps=$(( n_and > 2 ? n_and - 2 : 0 ))
-    local expected_lines=$(( expected_wraps + 1 ))
-    local actual_lines; actual_lines=$(printf '%s\n' "$output" | wc -l)
-
-    local _errs=0
-    [[ "$out_ands" == "$n_and" ]] || { _errs=$((_errs+1)); echo "    AND MISMATCH: expected $n_and &&, got $out_ands"; }
-    [[ "$wraps" == "$expected_wraps" ]] || { _errs=$((_errs+1)); echo "    WRAP MISMATCH: expected $expected_wraps wraps, got $wraps"; }
-
-    if [[ $_errs -eq 0 ]]; then
-        PASS=$((PASS+1))
-        echo "  ✓ $name: $n_and && → $wraps wraps, $actual_lines lines (all && preserved)"
-    else
-        FAIL=$((FAIL+1))
-        echo "  ✗ $name FAILED"
-        printf '%s\n' "$output" | sed 's/^/    /'
-    fi
-}
 
 verify_and_count C01 2 "a && b && c"
 verify_and_count C02 3 "a && b && c && d"
@@ -207,13 +170,10 @@ verify_and_count C05 7 "a && b && c && d && e && f && g && h"
 verify_and_count C06 10 "a && b && c && d && e && f && g && h && i && j && k"
 verify_and_count C07 15 "a && b && c && d && e && f && g && h && i && j && k && l && m && n && o && p"
 verify_and_count C08 3 "x1 && x2; y1 && y2 && y3"
-# total 4 ands per input line → wraps at 3rd, 4th
 verify_and_count C09 4 "x1 && x2; y1 && y2 && y3 && y4"
 
 echo ""
 echo "================================================"
 echo "Stress Results: $PASS passed, $FAIL failed, $TNUM total"
-if ((FAIL > 0)); then
-    exit 1
-fi
+(( FAIL > 0 )) && exit 1
 exit 0

@@ -810,13 +810,13 @@ cd test
 
 ### 2026-06-11 — awk Formatter && Line-Break & Box Frame Fix
 
-**🔗 && Line-Break** — `bash_format.awk` now detects `&&` chains: when 3 or more `&&` appear in a single line, the 3rd and subsequent `&&` are wrapped with ` \` to a new indented line. `_and_count` tracks per-line `&&` occurrences; count resets across `;` boundaries. Single `&` (background) and `&>` (redirection) are correctly ignored.
+**🔗 && Line-Break** — `bash_format.awk` now wraps **every** `&&` with ` \` to a new indented line (each continuation line carries at most one `&&`). `_and_count` tracks per-line `&&` occurrences; count resets across `;` boundaries. Single `&` (background) and `&>` (redirection) are correctly ignored.
 
 **📦 Box Frame Dynamic Width** — Replaced hardcoded 128-character horizontal fill pool with `printf -v _h "%${_box_w}s" ""; _h="${_h// /─}"`. Fixes border asymmetry on wide terminals (>128 cols) where top/bottom borders would be misaligned.
 
 **🧹 `_strip_ansi` Simplification** — `test_box_frame.sh`: replaced bash `while`-loop ANSI strip with single `sed 's/\x1b\[[0-9;]*m//g'` pipe, simpler and faster.
 
-**🧪 New Tests** — `test_bash_format.sh` Phase 4: 8 `&&` line-break tests (A01–A08). `test_box_frame.sh` Phase 8: 5 wide-terminal border consistency tests (wb1–wb5, 60 combinations + 200 random boxes).
+**🧪 New Tests** — `test_bash_format.sh` Phase 4: 8 `&&` line-break tests (A01–A08). `test_box_frame.sh` Phase 8: 5 wide-terminal border consistency tests (wb1–wb5, 60 combinations + 200 random boxes). `test_and_wrap_stress.sh` reworked with `verify_and_count` for the every-`&&`-wraps rule (18 correctness tests + 500-line throughput).
 
 ### 2026-06-10 — awk Compatibility Fix
 
