@@ -808,6 +808,10 @@ cd test
 
 ## 📝 Changelog
 
+### 2026-06-11 — Table Tool
+
+**📊 Built-in `table` Tool** — New `table()` tool for the format agent: renders aligned box-drawing tables with auto-calculated column widths (min 4, max 45 chars). Supports per-column alignment (left/right/center), CJK/emoji-safe `_str_display_width()` sizing, auto header/separator rows, and terminal-width clamping when total width exceeds `TERM_WIDTH`. BSRP system prompt rules D8, T5, TBL1–TBL7 updated — agents now call `table(columns, align, rows)` instead of hand-drawing box characters. `FORMAT_AGENT_META` now includes `"table"` tool; `dispatch_tool()` routes `table` calls to `tool_table()`.
+
 ### 2026-06-11 — awk Formatter && Line-Break & Box Frame Fix
 
 **🔗 && Line-Break** — `bash_format.awk` now wraps **every** `&&` with ` \` to a new indented line (each continuation line carries at most one `&&`). `_and_count` tracks per-line `&&` occurrences; count resets across `;` boundaries. Single `&` (background) and `&>` (redirection) are correctly ignored.

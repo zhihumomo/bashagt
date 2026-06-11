@@ -806,6 +806,10 @@ cd test
 
 ## 📝 更新日志
 
+### 2026-06-11 — Table 表格工具
+
+**📊 内置 `table` 工具** — 新增 format agent 专用的 `table()` 工具：渲染对齐的制表符表格，自动计算列宽（最小 4，最大 45 字符），支持列对齐（左/右/居中）、CJK/emoji 安全的 `_str_display_width()` 宽度计算、自动表头/分隔行以及总宽超出 `TERM_WIDTH` 时的终端宽度自适应。BSRP 系统提示规则 D8、T5、TBL1–TBL7 全部更新 — 智能体现在调用 `table(columns, align, rows)` 而非手工绘制制表符。`FORMAT_AGENT_META` 纳入 `"table"` 工具；`dispatch_tool()` 将 `table` 调用路由至 `tool_table()`。
+
 ### 2026-06-11 — awk 格式化 && 换行 & Box 边框修复
 
 **🔗 && 换行** — `bash_format.awk` 现在对**每一个** `&&` 都使用 ` \` 换行并缩进（每行至多一个 `&&`）。`_and_count` 按行追踪 `&&` 计数；`;` 边界处计数重置。单个 `&`（后台）和 `&>`（重定向）正确忽略。
